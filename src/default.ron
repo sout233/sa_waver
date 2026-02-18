@@ -1,0 +1,32 @@
+(
+  knots: [
+    (
+      position: (0.0, 0.0),
+      interpolation: Linear,
+      left_tangent: (
+        slope: 1.0,
+        mode: Aligned,
+        weight: None,
+      ),
+      right_tangent: (
+        slope: 1.0,
+        mode: Aligned,
+        weight: None,
+      ),
+    ),
+    (
+      position: (1.0, 1.0),
+      interpolation: Linear,
+      left_tangent: (
+        slope: 1.0,
+        mode: Aligned,
+        weight: None,
+      ),
+      right_tangent: (
+        slope: 1.0,
+        mode: Aligned,
+        weight: None,
+      ),
+    ),
+  ],
+)
