@@ -390,6 +390,7 @@ impl EditorData {
 
                             let current_t = latest_input_ptr.load(Ordering::Relaxed);
                             let mut output_y = None;
+                            let mut display_output_y = None;
                             let mut top_y = 0.0;
                             let mut bottom_y = 0.0;
 
@@ -402,9 +403,12 @@ impl EditorData {
                                     if let (Some(mut curve), Some(mut editor_ui)) = (lookup_curve.try_lock(), editor.try_lock()) {
                                         let side_length = ui.available_height().max(350.0);
                                         let square_size = egui::Vec2::splat(side_length);
-                                        output_y = editor_ui.sample_point;
-                                        top_y = editor_ui.top_one_point.y;
-                                        bottom_y = editor_ui.bottom_zero_point.y;
+                                        let should_draw_manual_indicator = linear_ext_enabled && current_t > 1.0;
+                                        let sample_for_editor = if should_draw_manual_indicator {
+                                            None
+                                        } else {
+                                            Some(current_t)
+                                        };
 
                                         // curve editor
                                         egui::Frame::new()
@@ -423,7 +427,9 @@ impl EditorData {
                                             .show(ui, |ui| {
                                                 ui.vertical(|ui| {
                                                     ui.allocate_ui(square_size, |ui| {
-                                                        if editor_ui.ui(ui, &mut curve, Some(current_t)) {
+                                                        let curve_rect = ui.max_rect();
+
+                                                        if editor_ui.ui(ui, &mut curve, sample_for_editor) {
                                                             if let Some(mut lut) = lut_cache.try_lock() {
                                                                 lut.clear();
                                                                 let lut_size = current_resolution_ptr.load(Ordering::Relaxed);
@@ -433,13 +439,67 @@ impl EditorData {
                                                                 }
                                                             }
                                                         }
+
+                                                        let curve_to_screen = |curve_x: f32, curve_y: f32| -> Pos2 {
+                                                            let canvas_x = (curve_x - editor_ui.offset.x) * editor_ui.editor_size.x
+                                                                / editor_ui.scale.x;
+                                                            let canvas_y = editor_ui.editor_size.y
+                                                                - ((curve_y - editor_ui.offset.y) * editor_ui.editor_size.y
+                                                                    / editor_ui.scale.y);
+
+                                                            egui::pos2(curve_rect.left() + canvas_x, curve_rect.top() + canvas_y)
+                                                        };
+
+                                                        top_y = curve_to_screen(1.0, 1.0).y;
+                                                        bottom_y = curve_to_screen(0.0, 0.0).y;
+
+                                                        if should_draw_manual_indicator {
+                                                            if let Some(lut) = lut_cache.try_lock() {
+                                                                let curve_y =
+                                                                    curve_lookup_with_linear_ext(&lut, current_t, linear_ext_enabled);
+                                                                let visible_max_x = editor_ui.offset.x + editor_ui.scale.x;
+                                                                let visible_min_x = editor_ui.offset.x;
+                                                                let indicator_x = current_t.clamp(visible_min_x, visible_max_x);
+                                                                let indicator_pos = curve_to_screen(indicator_x, curve_y);
+
+                                                                display_output_y = Some(indicator_pos.y);
+
+                                                                ui.painter().line_segment(
+                                                                    [
+                                                                        indicator_pos,
+                                                                        egui::pos2(curve_rect.right(), indicator_pos.y),
+                                                                    ],
+                                                                    egui::Stroke::new(1.0, Color32::LIGHT_GREEN),
+                                                                );
+
+                                                                ui.painter()
+                                                                    .circle_filled(indicator_pos, 3.0, Color32::LIGHT_GREEN);
+
+                                                                if current_t > visible_max_x {
+                                                                    let arrow_tip = egui::pos2(curve_rect.right() - 2.0, indicator_pos.y);
+                                                                    let arrow_back_top =
+                                                                        egui::pos2(curve_rect.right() - 10.0, indicator_pos.y - 5.0);
+                                                                    let arrow_back_bottom =
+                                                                        egui::pos2(curve_rect.right() - 10.0, indicator_pos.y + 5.0);
+
+                                                                    ui.painter().add(egui::Shape::convex_polygon(
+                                                                        vec![arrow_tip, arrow_back_top, arrow_back_bottom],
+                                                                        Color32::LIGHT_GREEN,
+                                                                        egui::Stroke::NONE,
+                                                                    ));
+                                                                }
+                                                            }
+                                                        } else {
+                                                            output_y = editor_ui.sample_point;
+                                                            display_output_y = editor_ui.sample_point.map(|point| point.y);
+                                                        }
                                                     });
                                                 });
                                             });
                                     }
 
                                     // waveform(ui, waveform_buffer.clone());
-                                    let current_t = if output_y.is_some() { output_y.unwrap().y } else { 0.0 };
+                                    let current_t = display_output_y.unwrap_or_else(|| output_y.map(|point| point.y).unwrap_or(0.0));
 
                                     // oscilloscope
                                     egui::Frame::new()
@@ -961,4 +1021,38 @@ fn waveform(ui: &mut egui::Ui, waveform_buffer: Arc<Mutex<Vec<f32>>>, timebase: 
             }
         }
     });
+}
+
+fn curve_lookup_with_linear_ext(lut: &[f32], input: f32, linear_ext_enabled: bool) -> f32 {
+    if lut.is_empty() {
+        return 0.0;
+    }
+
+    let lut_size = lut.len();
+    let abs_input = if linear_ext_enabled {
+        input.abs()
+    } else {
+        input.abs().min(1.0)
+    };
+
+    let t = abs_input * (lut_size - 1) as f32;
+    let index = t.floor() as usize;
+    let fraction = t - index as f32;
+
+    if index >= lut_size - 1 {
+        if linear_ext_enabled && lut_size >= 2 {
+            let last_val = lut[lut_size - 1];
+            let prev_val = lut[lut_size - 2];
+            let slope = last_val - prev_val;
+            let excess = t - (lut_size - 1) as f32;
+
+            last_val + slope * excess
+        } else {
+            lut[lut_size - 1]
+        }
+    } else {
+        let a = lut[index];
+        let b = lut[index + 1];
+        a + fraction * (b - a)
+    }
 }
