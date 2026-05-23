@@ -177,27 +177,7 @@ impl EditorData {
                                         ui.heading("SA Waver");
 
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            ui.add_space(2.0);
-
-                                            ui.scope(|ui| {
-                                                let visuals = ui.visuals_mut();
-                                                sout_ui::make_ghost_button_visuals(visuals);
-                                                if ui
-                                                    .add(
-                                                        egui::Button::new(
-                                                            RichText::new("")
-                                                                .size(14.0)
-                                                                .color(Color32::from_hex("#FFEAD0").unwrap()),
-                                                        )
-                                                        .min_size(egui::vec2(24.0, 24.0)),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    open_about_modal_ptr.store(true, Ordering::Relaxed);
-                                                }
-                                            });
-
-                                            // ghost_button(ui, "".into());
+                                            ui.add_space(4.0);
 
                                             let img_size = egui::vec2(12.0, 12.0);
                                             let img_src = egui::load::SizedTexture::new(save_texture.id(), img_size);
@@ -210,8 +190,43 @@ impl EditorData {
                                                     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
                                                         ui.add_space(4.0);
 
-                                                        // save button
-                                                        if ui.add(egui::Button::image(img_src).min_size(egui::vec2(24.0, 24.0))).clicked() {
+                                                        let response = ui.add_sized(
+                                                            egui::vec2(24.0, 24.0),
+                                                            egui::Button::new(
+                                                                RichText::new(" ")
+                                                                    .size(14.0)
+                                                                    .color(Color32::TRANSPARENT),
+                                                            ),
+                                                        );
+
+                                                        let icon_pos = response.rect.center() + egui::vec2(-1.8, -0.5);
+                                                        ui.painter().text(
+                                                            icon_pos,
+                                                            egui::Align2::CENTER_CENTER,
+                                                            "",
+                                                            egui::FontId::proportional(14.0),
+                                                            Color32::from_hex("#FFEAD0").unwrap(),
+                                                        );
+
+                                                        if response.clicked() {
+                                                            open_about_modal_ptr.store(true, Ordering::Relaxed);
+                                                        }
+                                                    });
+                                                });
+                                            });
+
+                                            ui.scope(|ui| {
+                                                let visuals = ui.visuals_mut();
+                                                sout_ui::make_ghost_button_visuals(visuals);
+
+                                                ui.allocate_ui(egui::vec2(24.0, ui.available_height()), |ui| {
+                                                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                                                        ui.add_space(4.0);
+
+                                                        if ui
+                                                            .add(egui::Button::image(img_src).min_size(egui::vec2(24.0, 24.0)))
+                                                            .clicked()
+                                                        {
                                                             println!("Save clicked");
                                                             if let Some(current_preset_guard) = current_preset_ptr.try_lock() {
                                                                 let suggestion = next_preset_version_name(&current_preset_guard);
