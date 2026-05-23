@@ -35,6 +35,7 @@ pub struct EditorData {
     pub saving_preset_name: Arc<Mutex<String>>,
     pub open_save_modal: Arc<AtomicBool>,
     pub open_msg_modal: Arc<AtomicBool>,
+    pub open_about_modal: Arc<AtomicBool>,
     pub msg_modal_title: Arc<Mutex<String>>,
     pub msg_modal_content: Arc<Mutex<String>>,
 }
@@ -47,6 +48,7 @@ impl EditorData {
         current_resolution: Arc<AtomicUsize>,
         current_timebase: Arc<AtomicUsize>,
         linear_ext: Arc<AtomicBool>,
+        current_oversampling_factor: Arc<AtomicUsize>,
     ) -> Option<Box<dyn Editor>> {
         let lookup_curve = self.lookup_curve.clone();
         let editor = self.editor.clone();
@@ -59,8 +61,10 @@ impl EditorData {
         let current_resolution_ptr = current_resolution.clone();
         let current_timebase_ptr = current_timebase.clone();
         let linear_ext_enabled_ptr = linear_ext.clone();
+        let current_oversampling_factor_ptr = current_oversampling_factor.clone();
         let open_save_modal_ptr = self.open_save_modal.clone();
         let open_msg_modal_ptr = self.open_msg_modal.clone();
+        let open_about_modal_ptr = self.open_about_modal.clone();
         let saving_preset_name_ptr = self.saving_preset_name.clone();
         let msg_modal_title_ptr = self.msg_modal_title.clone();
         let msg_modal_content_ptr = self.msg_modal_content.clone();
@@ -245,6 +249,55 @@ impl EditorData {
                                                     if modal.should_close() {
                                                         open_msg_modal_ptr.store(false, Ordering::Relaxed);
                                                     }
+                                                }
+                                            }
+
+                                            if open_about_modal_ptr.load(Ordering::Relaxed) {
+                                                let modal = Modal::new(Id::new("About Modal")).show(ui.ctx(), |ui| {
+                                                    ui.set_width(320.0);
+
+                                                    ui.heading("SA Waver");
+                                                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                                                    ui.add_space(8.0);
+
+                                                    ui.scope(|ui| {
+                                                        let visuals = ui.visuals_mut();
+                                                        sout_ui::make_btn_visuals(
+                                                            visuals,
+                                                            Color32::from_hex("#554e4a").unwrap(),
+                                                            Color32::from_hex("#6a625d").unwrap(),
+                                                            Color32::from_hex("#FFEAD0").unwrap(),
+                                                        );
+                                                        ui.style_mut().spacing.button_padding = egui::vec2(10.0, 6.0);
+
+                                                        if ui.button("󰖟 Homepage").clicked() {
+                                                            ui.ctx().open_url(egui::OpenUrl::new_tab(
+                                                                "https://audio.soout.top/sa_waver",
+                                                            ));
+                                                        }
+
+                                                        if ui.button(" GitHub").clicked() {
+                                                            ui.ctx().open_url(egui::OpenUrl::new_tab(
+                                                                "https://github.com/sout233/sa_waver",
+                                                            ));
+                                                        }
+                                                    });
+
+                                                    ui.add_space(8.0);
+
+                                                    egui::Sides::new().show(
+                                                        ui,
+                                                        |_ui| {},
+                                                        |ui| {
+                                                            if ui.button("Close").clicked() {
+                                                                open_about_modal_ptr.store(false, Ordering::Relaxed);
+                                                            }
+                                                        },
+                                                    );
+                                                });
+
+                                                if modal.should_close() {
+                                                    open_about_modal_ptr.store(false, Ordering::Relaxed);
                                                 }
                                             }
 
@@ -555,112 +608,192 @@ impl EditorData {
                                             ui.add_space(4.0);
 
                                             ui.vertical(|ui| {
-                                                ui.label(RichText::new("󰄉 Timebase").size(12.0));
+                                                ui.horizontal(|ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.label(RichText::new("󰄉 Timebase").size(12.0));
 
-                                                ui.scope(|ui| {
-                                                    let visuals = ui.visuals_mut();
-                                                    sout_ui::make_combobox_visuals(visuals, Color32::from_hex("#34302e").unwrap());
-                                                    ui.style_mut().spacing.interact_size.y = 24.0;
-
-                                                    ui.allocate_ui_with_layout(
-                                                        egui::vec2(100.0, 24.0),
-                                                        egui::Layout::top_down_justified(egui::Align::Min),
-                                                        |ui| {
-                                                            ui.set_width(ui.available_width());
-                                                            ui.set_height(ui.available_height());
-
-                                                            let current_val = current_timebase_ptr.load(Ordering::Relaxed);
-                                                            let mut selected_val = current_val;
-
-                                                            let _response = egui::ComboBox::from_id_salt("timebase_selector")
-                                                                .width(100.0)
-                                                                .selected_text(format!("{}", selected_val))
-                                                                .show_ui(ui, |ui| {
-                                                                    ui.selectable_value(&mut selected_val, 128, "128");
-
-                                                                    ui.selectable_value(&mut selected_val, 256, "256");
-
-                                                                    ui.selectable_value(&mut selected_val, 512, "512");
-
-                                                                    ui.selectable_value(&mut selected_val, 1024, "1024");
-
-                                                                    ui.separator();
-                                                                    ui.horizontal(|ui| {
-                                                                        ui.label("Custom:");
-                                                                        ui.add(
-                                                                            egui::DragValue::new(&mut selected_val)
-                                                                                .clamp_existing_to_range(true)
-                                                                                .range(64..=4096),
-                                                                        );
-                                                                    });
-                                                                });
-
-                                                            if selected_val != current_val {
-                                                                current_timebase_ptr.store(selected_val, Ordering::Relaxed);
-
-                                                                println!(
-                                                                    "Timebase changed to: {}",
-                                                                    current_timebase_ptr.load(Ordering::Relaxed)
-                                                                );
-                                                            }
-                                                        },
-                                                    );
-                                                });
-
-                                                ui.add_space(4.0);
-
-                                                ui.scope(|ui| {
-                                                    let visuals = ui.visuals_mut();
-                                                    sout_ui::make_combobox_visuals(visuals, Color32::from_hex("#34302e").unwrap());
-
-                                                    ui.style_mut().spacing.button_padding = egui::vec2(8.0, 2.0);
-                                                    ui.style_mut().spacing.interact_size.y = 24.0;
-
-                                                    ui.allocate_ui_with_layout(
-                                                        egui::vec2(100.0, 24.0),
-                                                        egui::Layout::top_down_justified(egui::Align::Min),
-                                                        |ui| {
-                                                            ui.set_width(ui.available_width());
-                                                            ui.set_height(ui.available_height());
-
+                                                        ui.scope(|ui| {
                                                             let visuals = ui.visuals_mut();
-                                                            if linear_ext_enabled {
-                                                                sout_ui::make_btn_visuals(
-                                                                    visuals,
-                                                                    Color32::from_hex("#DB9160").unwrap(),
-                                                                    Color32::from_hex("#FFCBA8").unwrap().gamma_multiply(0.8),
-                                                                    Color32::from_hex("#2B1100").unwrap(),
-                                                                );
-                                                            }
+                                                            sout_ui::make_combobox_visuals(visuals, Color32::from_hex("#34302e").unwrap());
+                                                            ui.style_mut().spacing.interact_size.y = 24.0;
 
-                                                            let text_color = if linear_ext_enabled {
-                                                                Color32::from_hex("#2B1100").unwrap()
-                                                            } else {
-                                                                Color32::from_hex("#FFEAD0").unwrap()
-                                                            };
+                                                            ui.allocate_ui_with_layout(
+                                                                egui::vec2(100.0, 24.0),
+                                                                egui::Layout::top_down_justified(egui::Align::Min),
+                                                                |ui| {
+                                                                    ui.set_width(ui.available_width());
+                                                                    ui.set_height(ui.available_height());
 
-                                                            if ui
-                                                                .add(
-                                                                    egui::Button::new(RichText::new("Linear Ext.").color(text_color))
-                                                                        .wrap_mode(egui::TextWrapMode::Extend)
-                                                                        .min_size(Vec2::new(0.0, 0.0)),
-                                                                )
-                                                                .clicked()
-                                                            {
-                                                                println!("Linear Extension clicked");
-                                                                linear_ext_enabled_ptr.store(
-                                                                    !linear_ext_enabled_ptr.load(Ordering::Relaxed),
-                                                                    Ordering::Relaxed,
-                                                                );
-                                                            }
-                                                        },
-                                                    );
+                                                                    let current_val = current_timebase_ptr.load(Ordering::Relaxed);
+                                                                    let mut selected_val = current_val;
+
+                                                                    let _response = egui::ComboBox::from_id_salt("timebase_selector")
+                                                                        .width(100.0)
+                                                                        .selected_text(format!("{}", selected_val))
+                                                                        .show_ui(ui, |ui| {
+                                                                            ui.selectable_value(&mut selected_val, 128, "128");
+                                                                            ui.selectable_value(&mut selected_val, 256, "256");
+                                                                            ui.selectable_value(&mut selected_val, 512, "512");
+                                                                            ui.selectable_value(&mut selected_val, 1024, "1024");
+
+                                                                            ui.separator();
+                                                                            ui.horizontal(|ui| {
+                                                                                ui.label("Custom:");
+                                                                                ui.add(
+                                                                                    egui::DragValue::new(&mut selected_val)
+                                                                                        .clamp_existing_to_range(true)
+                                                                                        .range(64..=4096),
+                                                                                );
+                                                                            });
+                                                                        });
+
+                                                                    if selected_val != current_val {
+                                                                        current_timebase_ptr.store(selected_val, Ordering::Relaxed);
+
+                                                                        println!(
+                                                                            "Timebase changed to: {}",
+                                                                            current_timebase_ptr.load(Ordering::Relaxed)
+                                                                        );
+                                                                    }
+                                                                },
+                                                            );
+                                                        });
+
+                                                        ui.add_space(4.0);
+
+                                                        ui.scope(|ui| {
+                                                            let visuals = ui.visuals_mut();
+                                                            sout_ui::make_combobox_visuals(visuals, Color32::from_hex("#34302e").unwrap());
+
+                                                            ui.style_mut().spacing.button_padding = egui::vec2(8.0, 2.0);
+                                                            ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                            ui.allocate_ui_with_layout(
+                                                                egui::vec2(100.0, 24.0),
+                                                                egui::Layout::top_down_justified(egui::Align::Min),
+                                                                |ui| {
+                                                                    ui.set_width(ui.available_width());
+                                                                    ui.set_height(ui.available_height());
+
+                                                                    let visuals = ui.visuals_mut();
+                                                                    if linear_ext_enabled {
+                                                                        sout_ui::make_btn_visuals(
+                                                                            visuals,
+                                                                            Color32::from_hex("#DB9160").unwrap(),
+                                                                            Color32::from_hex("#FFCBA8")
+                                                                                .unwrap()
+                                                                                .gamma_multiply(0.8),
+                                                                            Color32::from_hex("#2B1100").unwrap(),
+                                                                        );
+                                                                    }
+
+                                                                    let text_color = if linear_ext_enabled {
+                                                                        Color32::from_hex("#2B1100").unwrap()
+                                                                    } else {
+                                                                        Color32::from_hex("#FFEAD0").unwrap()
+                                                                    };
+
+                                                                    if ui
+                                                                        .add(
+                                                                            egui::Button::new(
+                                                                                RichText::new("Linear Ext.")
+                                                                                    .color(text_color),
+                                                                            )
+                                                                            .wrap_mode(egui::TextWrapMode::Extend)
+                                                                            .min_size(Vec2::new(0.0, 0.0)),
+                                                                        )
+                                                                        .clicked()
+                                                                    {
+                                                                        println!("Linear Extension clicked");
+                                                                        linear_ext_enabled_ptr.store(
+                                                                            !linear_ext_enabled_ptr.load(Ordering::Relaxed),
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                    }
+                                                                },
+                                                            );
+                                                        });
+                                                    });
+
+                                                    ui.add_space(6.0);
+
+                                                    ui.vertical(|ui| {
+                                                        ui.label(RichText::new(" Oversample").size(12.0));
+
+                                                        ui.scope(|ui| {
+                                                            let visuals = ui.visuals_mut();
+                                                            sout_ui::make_combobox_visuals(visuals, Color32::from_hex("#34302e").unwrap());
+                                                            ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                            ui.allocate_ui_with_layout(
+                                                                egui::vec2(100.0, 24.0),
+                                                                egui::Layout::top_down_justified(egui::Align::Min),
+                                                                |ui| {
+                                                                    ui.set_width(ui.available_width());
+                                                                    ui.set_height(ui.available_height());
+
+                                                                    let current_factor =
+                                                                        current_oversampling_factor_ptr.load(Ordering::Relaxed);
+                                                                    let mut selected_factor = current_factor;
+
+                                                                    egui::ComboBox::from_id_salt("oversampling_selector")
+                                                                        .width(100.0)
+                                                                        .selected_text(format!("{}x", 1usize << selected_factor))
+                                                                        .show_ui(ui, |ui| {
+                                                                            ui.selectable_value(&mut selected_factor, 0, "1x");
+                                                                            ui.selectable_value(&mut selected_factor, 1, "2x");
+                                                                            ui.selectable_value(&mut selected_factor, 2, "4x");
+                                                                            ui.selectable_value(&mut selected_factor, 3, "8x");
+                                                                        });
+
+                                                                    if selected_factor != current_factor {
+                                                                        current_oversampling_factor_ptr
+                                                                            .store(selected_factor, Ordering::Relaxed);
+                                                                        println!("Oversampling changed to: {}x", 1usize << selected_factor);
+                                                                    }
+                                                                },
+                                                            );
+                                                        });
+
+                                                        ui.add_space(4.0);
+
+                                                        ui.scope(|ui| {
+                                                            let visuals = ui.visuals_mut();
+                                                            sout_ui::make_combobox_visuals(visuals, Color32::from_hex("#34302e").unwrap());
+
+                                                            ui.style_mut().spacing.button_padding = egui::vec2(8.0, 2.0);
+                                                            ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                            ui.allocate_ui_with_layout(
+                                                                egui::vec2(100.0, 24.0),
+                                                                egui::Layout::top_down_justified(egui::Align::Min),
+                                                                |ui| {
+                                                                    ui.set_width(ui.available_width());
+                                                                    ui.set_height(ui.available_height());
+
+                                                                    if ui
+                                                                        .add(
+                                                                            egui::Button::new(
+                                                                                RichText::new("About")
+                                                                                    .color(Color32::from_hex("#FFEAD0").unwrap()),
+                                                                            )
+                                                                            .wrap_mode(egui::TextWrapMode::Extend)
+                                                                            .min_size(Vec2::new(0.0, 0.0)),
+                                                                        )
+                                                                        .clicked()
+                                                                    {
+                                                                        open_about_modal_ptr.store(true, Ordering::Relaxed);
+                                                                    }
+                                                                },
+                                                            );
+                                                        });
+                                                    });
                                                 });
                                             });
                                         });
 
                                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                            ui.add_space(114.0);
+                                            ui.add_space(38.0);
 
                                             ui.vertical(|ui| {
                                                 ui.set_width(64.0);

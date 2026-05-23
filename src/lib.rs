@@ -9,21 +9,29 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::editor::EditorData;
+use crate::oversampling::Lanczos3Oversampler;
 
 mod editor;
 mod fs;
+mod oversampling;
 mod param_knob;
 mod sout_ui;
 
-// const WAVEFORM_SIZE: usize = 512;
+const MAX_OVERSAMPLING_FACTOR: usize = 3;
+const DEFAULT_OVERSAMPLING_FACTOR: usize = 0;
 
 pub struct WaverPlugin {
     params: Arc<WaverPluginParams>,
     editor_data: EditorData,
 
     pub linear_ext: Arc<AtomicBool>,
+    pub is_bipolar: Arc<AtomicBool>,
+
     pub current_resolution: Arc<AtomicUsize>,
     pub current_timebase: Arc<AtomicUsize>,
+    pub current_oversampling_factor: Arc<AtomicUsize>,
+    pub oversampling_times: Arc<AtomicF32>,
+    pub oversamplers: Vec<Lanczos3Oversampler>,
     // 降采样计数器
     pub sample_counter: usize,
     // 当前块的峰值累加器
@@ -37,6 +45,8 @@ struct WaverPluginParams {
     // The editor state
     #[persist = "editor_state"]
     editor_state: Arc<EguiState>,
+
+    pub oversampling_times: Arc<AtomicF32>,
 
     /// The parameter's ID is used to identify the parameter in the wrappred plugin API. As long as
     /// these IDs remain constant, you can rename and reorder these fields as you wish. The
@@ -89,6 +99,7 @@ impl Default for WaverPlugin {
 
                 open_save_modal: Arc::new(AtomicBool::new(false)),
                 open_msg_modal: Arc::new(AtomicBool::new(false)),
+                open_about_modal: Arc::new(AtomicBool::new(false)),
                 saving_preset_name: Arc::new(Mutex::new(String::new())),
                 msg_modal_title: Arc::new(Mutex::new(String::new())),
                 msg_modal_content: Arc::new(Mutex::new(String::new())),
@@ -96,6 +107,12 @@ impl Default for WaverPlugin {
             current_resolution: Arc::new(AtomicUsize::new(1024)),
             current_timebase: Arc::new(AtomicUsize::new(512)),
             linear_ext: Arc::new(AtomicBool::new(false)),
+            is_bipolar: Arc::new(AtomicBool::new(false)),
+            current_oversampling_factor: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_FACTOR)),
+            oversampling_times: Arc::new(AtomicF32::new(oversampling_factor_to_times(
+                DEFAULT_OVERSAMPLING_FACTOR,
+            ) as f32)),
+            oversamplers: Vec::new(),
             sample_counter: 0,
             current_chunk_peak: 0.0,
             input_peak_follower: 0.0,
@@ -106,8 +123,12 @@ impl Default for WaverPlugin {
 
 impl Default for WaverPluginParams {
     fn default() -> Self {
+        let oversampling_times =
+            Arc::new(AtomicF32::new(oversampling_factor_to_times(DEFAULT_OVERSAMPLING_FACTOR) as f32));
+
         Self {
-            editor_state: EguiState::from_size(1000, 520),
+            editor_state: EguiState::from_size(1040, 520),
+            oversampling_times: oversampling_times.clone(),
 
             pre_gain: FloatParam::new(
                 "Pre",
@@ -118,7 +139,10 @@ impl Default for WaverPluginParams {
                     factor: FloatRange::gain_skew_factor(-30.0, 30.0),
                 },
             )
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_smoother(SmoothingStyle::OversamplingAware(
+                oversampling_times.clone(),
+                &SmoothingStyle::Logarithmic(50.0),
+            ))
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
@@ -132,13 +156,19 @@ impl Default for WaverPluginParams {
                     factor: FloatRange::gain_skew_factor(-30.0, 30.0),
                 },
             )
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_smoother(SmoothingStyle::OversamplingAware(
+                oversampling_times.clone(),
+                &SmoothingStyle::Logarithmic(50.0),
+            ))
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::Linear(50.0))
+                .with_smoother(SmoothingStyle::OversamplingAware(
+                    oversampling_times,
+                    &SmoothingStyle::Linear(50.0),
+                ))
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(1))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
@@ -189,99 +219,119 @@ impl Plugin for WaverPlugin {
 
     fn initialize(
         &mut self,
-        _audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
-        _context: &mut impl InitContext<Self>,
+        audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        context: &mut impl InitContext<Self>,
     ) -> bool {
-        // Resize buffers and perform other potentially expensive initialization operations here.
-        // The `reset()` function is always called right after this function. You can remove this
-        // function if you do not need it.
+        let num_channels = audio_io_layout
+            .main_output_channels
+            .expect("Plugin was initialized without any outputs")
+            .get() as usize;
+
+        self.oversamplers.resize_with(num_channels, || {
+            Lanczos3Oversampler::new(buffer_config.max_buffer_size as usize, MAX_OVERSAMPLING_FACTOR)
+        });
+
+        if let Some(oversampler) = self.oversamplers.first() {
+            context.set_latency_samples(
+                oversampler.latency(self.current_oversampling_factor.load(Ordering::Relaxed)),
+            );
+        }
+
         true
     }
 
     fn reset(&mut self) {
-        // Reset buffers and envelopes here. This can be called from the audio thread and may not
-        // allocate. You can remove this function if you do not need it.
+        for oversampler in &mut self.oversamplers {
+            oversampler.reset();
+        }
     }
 
-    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _context: &mut impl ProcessContext<Self>) -> ProcessStatus {
+    fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, context: &mut impl ProcessContext<Self>) -> ProcessStatus {
         let mut block_max_abs = 0.0f32;
         const DOWNSAMPLE_RATE: usize = 256;
         let linear_ext_enabled = self.linear_ext.load(Ordering::Relaxed);
         let timebase = self.current_timebase.load(Ordering::Relaxed);
+        let oversampling_factor = self.current_oversampling_factor.load(Ordering::Relaxed);
+        let oversampling_times = oversampling_factor_to_times(oversampling_factor);
+        self.params
+            .oversampling_times
+            .store(oversampling_times as f32, Ordering::Relaxed);
 
-        for channel_samples in buffer.iter_samples() {
-            let pre_gain = self.params.pre_gain.smoothed.next();
-            let post_gain = self.params.post_gain.smoothed.next();
-            let mix = self.params.mix.smoothed.next();
+        if let Some(oversampler) = self.oversamplers.first() {
+            context.set_latency_samples(oversampler.latency(oversampling_factor));
+        }
 
-            // let lut_size = self.lut_size;
-            // let lut_size = self.current_resolution.load(Ordering::Relaxed);
+        if let Some(lut) = self.editor_data.lut_cache.try_lock() {
+            let lut_size = lut.len();
 
-            if let Some(lut) = self.editor_data.lut_cache.try_lock() {
-                let lut_size = lut.len();
-                if let Some(mut waveform_buf) = self.editor_data.waveform_buffer.try_lock() {
-                    for sample in channel_samples {
-                        let input = *sample * pre_gain;
+            for (_, block) in buffer.iter_blocks(buffer.samples()) {
+                for (channel_samples, oversampler) in block.into_iter().zip(self.oversamplers.iter_mut()) {
+                    oversampler.process(channel_samples, oversampling_factor, |upsampled| {
+                        for sample in upsampled {
+                            let pre_gain = self.params.pre_gain.smoothed.next();
+                            let post_gain = self.params.post_gain.smoothed.next();
+                            let mix = self.params.mix.smoothed.next();
 
-                        let raw_abs_input = input.abs();
-                        let abs_input = if linear_ext_enabled {
-                            raw_abs_input
-                        } else {
-                            raw_abs_input.min(1.0)
-                        };
+                            let dry_signal = *sample;
+                            let input = dry_signal * pre_gain;
 
-                        if abs_input > block_max_abs {
-                            block_max_abs = abs_input;
-                        }
-
-                        // LUT 映射
-                        let sign = input.signum();
-                        let t = abs_input * (lut_size - 1) as f32;
-                        let index = t.floor() as usize;
-                        let fraction = t - index as f32;
-
-                        let curve_val = if index >= lut_size - 1 {
-                            if linear_ext_enabled {
-                                let last_val = lut[lut_size - 1];
-                                let prev_val = lut[lut_size - 2];
-
-                                let slope = last_val - prev_val;
-
-                                let excess = t - (lut_size - 1) as f32;
-
-                                last_val + slope * excess
+                            let raw_abs_input = input.abs();
+                            let abs_input = if linear_ext_enabled {
+                                raw_abs_input
                             } else {
-                                lut[lut_size - 1]
+                                raw_abs_input.min(1.0)
+                            };
+
+                            if abs_input > block_max_abs {
+                                block_max_abs = abs_input;
                             }
-                        } else {
-                            let a = lut[index];
-                            let b = lut[index + 1];
-                            a + fraction * (b - a)
-                        };
 
-                        let wet_signal = curve_val * sign * post_gain;
+                            let sign = input.signum();
+                            let t = abs_input * (lut_size - 1) as f32;
+                            let index = t.floor() as usize;
+                            let fraction = t - index as f32;
 
-                        *sample = input * (1.0 - mix) + wet_signal * mix;
+                            let curve_val = if index >= lut_size - 1 {
+                                if linear_ext_enabled {
+                                    let last_val = lut[lut_size - 1];
+                                    let prev_val = lut[lut_size - 2];
+                                    let slope = last_val - prev_val;
+                                    let excess = t - (lut_size - 1) as f32;
 
-                        // peak only
-                        let out_abs = (curve_val * sign).abs();
-                        if out_abs > self.current_chunk_peak {
-                            self.current_chunk_peak = out_abs;
-                        }
+                                    last_val + slope * excess
+                                } else {
+                                    lut[lut_size - 1]
+                                }
+                            } else {
+                                let a = lut[index];
+                                let b = lut[index + 1];
+                                a + fraction * (b - a)
+                            };
 
-                        self.sample_counter += 1;
+                            let shaped = curve_val * sign;
+                            let wet_signal = shaped * post_gain;
+                            *sample = dry_signal * (1.0 - mix) + wet_signal * mix;
 
-                        if self.sample_counter >= DOWNSAMPLE_RATE {
-                            if waveform_buf.len() >= timebase {
-                                waveform_buf.remove(0);
+                            let out_abs = shaped.abs();
+                            if out_abs > self.current_chunk_peak {
+                                self.current_chunk_peak = out_abs;
                             }
-                            waveform_buf.push(self.current_chunk_peak);
 
-                            self.sample_counter = 0;
-                            self.current_chunk_peak = 0.0;
+                            self.sample_counter += 1;
+                            if self.sample_counter >= DOWNSAMPLE_RATE * oversampling_times {
+                                if let Some(mut waveform_buf) = self.editor_data.waveform_buffer.try_lock() {
+                                    if waveform_buf.len() >= timebase {
+                                        waveform_buf.remove(0);
+                                    }
+                                    waveform_buf.push(self.current_chunk_peak);
+                                }
+
+                                self.sample_counter = 0;
+                                self.current_chunk_peak = 0.0;
+                            }
                         }
-                    }
+                    });
                 }
             }
         }
@@ -304,6 +354,7 @@ impl Plugin for WaverPlugin {
             self.current_resolution.clone(),
             self.current_timebase.clone(),
             self.linear_ext.clone(),
+            self.current_oversampling_factor.clone(),
         )
     }
 }
@@ -334,3 +385,7 @@ impl Vst3Plugin for WaverPlugin {
 
 nih_export_vst3!(WaverPlugin);
 nih_export_clap!(WaverPlugin);
+
+const fn oversampling_factor_to_times(factor: usize) -> usize {
+    2usize.pow(factor as u32)
+}
