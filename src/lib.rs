@@ -5,6 +5,7 @@ use nih_plug::prelude::*;
 use nih_plug_egui::egui::ColorImage;
 use nih_plug_egui::EguiState;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -20,6 +21,16 @@ mod sout_ui;
 
 const MAX_OVERSAMPLING_FACTOR: usize = 3;
 const DEFAULT_OVERSAMPLING_FACTOR: usize = 0;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PlotStateSnapshot {
+    pub curve: LookupCurve,
+    pub resolution: usize,
+    pub timebase: usize,
+    pub linear_ext: bool,
+    pub oversampling_factor: usize,
+    pub colored_waveform: bool,
+}
 
 pub struct WaverPlugin {
     params: Arc<WaverPluginParams>,
@@ -68,6 +79,11 @@ struct WaverPluginParams {
     #[persist = "current_preset"]
     pub current_preset: Arc<Mutex<String>>,
 
+    #[persist = "saved_plot_state"]
+    pub saved_plot_state: Arc<Mutex<PlotStateSnapshot>>,
+
+    pub plot_dirty: Arc<AtomicBool>,
+
     pub oversampling_times: Arc<AtomicF32>,
 
     /// The parameter's ID is used to identify the parameter in the wrappred plugin API. As long as
@@ -108,6 +124,15 @@ impl Default for WaverPlugin {
         let params = Arc::new(WaverPluginParams::default());
         params.lookup_curve.set(lookup_curve.clone());
         *params.current_preset.lock() = String::from("./Default.ron");
+        *params.saved_plot_state.lock() = capture_plot_state(
+            &lookup_curve,
+            1024,
+            512,
+            false,
+            DEFAULT_OVERSAMPLING_FACTOR,
+            false,
+        );
+        params.plot_dirty.store(false, Ordering::Relaxed);
 
         Self {
             params: params.clone(),
@@ -123,6 +148,7 @@ impl Default for WaverPlugin {
                 colored_waveform: params.colored_waveform.clone(),
                 presets: Arc::new(Mutex::new(Vec::new())),
                 current_preset: params.current_preset.clone(),
+                plot_dirty: params.plot_dirty.clone(),
 
                 open_save_modal: Arc::new(AtomicBool::new(false)),
                 open_msg_modal: Arc::new(AtomicBool::new(false)),
@@ -156,13 +182,22 @@ impl Default for WaverPluginParams {
 
         Self {
             editor_state: EguiState::from_size(1040, 520),
-            lookup_curve: Arc::new(Mutex::new(lookup_curve)),
+            lookup_curve: Arc::new(Mutex::new(lookup_curve.clone())),
             current_resolution: Arc::new(AtomicUsize::new(1024)),
             current_timebase: Arc::new(AtomicUsize::new(512)),
             linear_ext: Arc::new(AtomicBool::new(false)),
             current_oversampling_factor: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_FACTOR)),
             colored_waveform: Arc::new(AtomicBool::new(false)),
             current_preset: Arc::new(Mutex::new(String::from("./Default.ron"))),
+            saved_plot_state: Arc::new(Mutex::new(PlotStateSnapshot {
+                curve: lookup_curve.clone(),
+                resolution: 1024,
+                timebase: 512,
+                linear_ext: false,
+                oversampling_factor: DEFAULT_OVERSAMPLING_FACTOR,
+                colored_waveform: false,
+            })),
+            plot_dirty: Arc::new(AtomicBool::new(false)),
             oversampling_times: oversampling_times.clone(),
 
             pre_gain: FloatParam::new(
@@ -411,6 +446,71 @@ pub fn rebuild_lut(curve: &LookupCurve, resolution: usize) -> Vec<f32> {
         lut.push(if value.is_finite() { value } else { 0.0 });
     }
     lut
+}
+
+pub fn capture_plot_state(
+    curve: &LookupCurve,
+    resolution: usize,
+    timebase: usize,
+    linear_ext: bool,
+    oversampling_factor: usize,
+    colored_waveform: bool,
+) -> PlotStateSnapshot {
+    PlotStateSnapshot {
+        curve: curve.clone(),
+        resolution,
+        timebase,
+        linear_ext,
+        oversampling_factor,
+        colored_waveform,
+    }
+}
+
+pub fn plot_state_matches(
+    snapshot: &PlotStateSnapshot,
+    curve: &LookupCurve,
+    resolution: usize,
+    timebase: usize,
+    linear_ext: bool,
+    oversampling_factor: usize,
+    colored_waveform: bool,
+) -> bool {
+    snapshot.resolution == resolution
+        && snapshot.timebase == timebase
+        && snapshot.linear_ext == linear_ext
+        && snapshot.oversampling_factor == oversampling_factor
+        && snapshot.colored_waveform == colored_waveform
+        && curves_match(&snapshot.curve, curve)
+}
+
+fn curves_match(a: &LookupCurve, b: &LookupCurve) -> bool {
+    let a_knots = a.knots();
+    let b_knots = b.knots();
+    if a_knots.len() != b_knots.len() {
+        return false;
+    }
+
+    a_knots.iter().zip(b_knots.iter()).all(|(left, right)| {
+        left.position.x.to_bits() == right.position.x.to_bits()
+            && left.position.y.to_bits() == right.position.y.to_bits()
+            && std::mem::discriminant(&left.interpolation) == std::mem::discriminant(&right.interpolation)
+            && left.left_tangent.slope.to_bits() == right.left_tangent.slope.to_bits()
+            && std::mem::discriminant(&left.left_tangent.mode)
+                == std::mem::discriminant(&right.left_tangent.mode)
+            && option_f32_bits_equal(left.left_tangent.weight, right.left_tangent.weight)
+            && left.right_tangent.slope.to_bits() == right.right_tangent.slope.to_bits()
+            && std::mem::discriminant(&left.right_tangent.mode)
+                == std::mem::discriminant(&right.right_tangent.mode)
+            && option_f32_bits_equal(left.right_tangent.weight, right.right_tangent.weight)
+    })
+}
+
+fn option_f32_bits_equal(a: Option<f32>, b: Option<f32>) -> bool {
+    match (a, b) {
+        (Some(left), Some(right)) => left.to_bits() == right.to_bits(),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 pub fn sync_lut_cache_from_state(

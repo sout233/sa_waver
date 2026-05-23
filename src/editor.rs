@@ -16,7 +16,7 @@ use nih_plug_egui::{
 use parking_lot::Mutex;
 
 use crate::{
-    fs, load_image_from_memory, sync_lut_cache_from_state,
+    capture_plot_state, fs, load_image_from_memory, plot_state_matches, sync_lut_cache_from_state,
     param_knob::ParamKnob,
     sout_ui::{self, SoutTheme},
     WaverPluginParams,
@@ -33,6 +33,7 @@ pub struct EditorData {
     pub colored_waveform: Arc<AtomicBool>,
     pub presets: Arc<Mutex<Vec<String>>>,
     pub current_preset: Arc<Mutex<String>>,
+    pub plot_dirty: Arc<AtomicBool>,
     pub saving_preset_name: Arc<Mutex<String>>,
     pub open_save_modal: Arc<AtomicBool>,
     pub open_msg_modal: Arc<AtomicBool>,
@@ -60,6 +61,7 @@ impl EditorData {
         let colored_waveform_ptr = self.colored_waveform.clone();
         let presets_ptr = self.presets.clone();
         let current_preset_ptr = self.current_preset.clone();
+        let plot_dirty_ptr = self.plot_dirty.clone();
         let current_resolution_ptr = current_resolution.clone();
         let current_timebase_ptr = current_timebase.clone();
         let linear_ext_enabled_ptr = linear_ext.clone();
@@ -161,6 +163,12 @@ impl EditorData {
                                                         // save button
                                                         if ui.add(egui::Button::image(img_src).min_size(egui::vec2(24.0, 24.0))).clicked() {
                                                             println!("Save clicked");
+                                                            if let Some(current_preset_guard) = current_preset_ptr.try_lock() {
+                                                                let suggestion = next_preset_version_name(&current_preset_guard);
+                                                                if let Some(mut name_guard) = saving_preset_name_ptr.try_lock() {
+                                                                    *name_guard = suggestion;
+                                                                }
+                                                            }
                                                             open_save_modal_ptr.store(true, Ordering::Relaxed);
                                                         }
                                                     });
@@ -210,6 +218,18 @@ impl EditorData {
                                                                                         "Success",
                                                                                         format!("Saved preset to: {}", path),
                                                                                     );
+                                                                                    *current_preset_ptr.lock() = path.clone();
+                                                                                    *params.saved_plot_state.lock() = capture_plot_state(
+                                                                                        &curve,
+                                                                                        current_resolution_ptr.load(Ordering::Relaxed),
+                                                                                        current_timebase_ptr.load(Ordering::Relaxed),
+                                                                                        linear_ext_enabled_ptr.load(Ordering::Relaxed),
+                                                                                        current_oversampling_factor_ptr.load(Ordering::Relaxed),
+                                                                                        colored_waveform_ptr.load(Ordering::Relaxed),
+                                                                                    );
+                                                                                    plot_dirty_ptr.store(false, Ordering::Relaxed);
+                                                                                    let presets = fs::get_presets().unwrap_or_default();
+                                                                                    *presets_ptr.lock() = presets;
                                                                                 }
                                                                             }
                                                                         }
@@ -327,11 +347,28 @@ impl EditorData {
                                                     }
                                                 };
 
-                                                if let Some(mut current_preset_guard) = current_preset_ptr.try_lock() {
+                                                if let (Some(mut current_preset_guard), Some(curve_guard)) =
+                                                    (current_preset_ptr.try_lock(), lookup_curve.try_lock())
+                                                {
+                                                    let plot_dirty = !plot_state_matches(
+                                                        &params.saved_plot_state.lock(),
+                                                        &curve_guard,
+                                                        current_resolution_ptr.load(Ordering::Relaxed),
+                                                        current_timebase_ptr.load(Ordering::Relaxed),
+                                                        linear_ext_enabled_ptr.load(Ordering::Relaxed),
+                                                        current_oversampling_factor_ptr.load(Ordering::Relaxed),
+                                                        colored_waveform_ptr.load(Ordering::Relaxed),
+                                                    );
+                                                    plot_dirty_ptr.store(plot_dirty, Ordering::Relaxed);
                                                     let previous_preset = current_preset_guard.clone();
+                                                    let preset_label = if plot_dirty {
+                                                        format!("{} *", get_filename(&current_preset_guard))
+                                                    } else {
+                                                        get_filename(&current_preset_guard)
+                                                    };
 
                                                     let response = egui::ComboBox::from_id_salt("preset_selector")
-                                                        .selected_text(get_filename(&current_preset_guard))
+                                                        .selected_text(preset_label)
                                                         .show_ui(ui, |ui| {
                                                             ui.selectable_value(
                                                                 &mut *current_preset_guard,
@@ -361,12 +398,30 @@ impl EditorData {
                                                                 Ok(c) => {
                                                                     *curve = c;
                                                                     curve_dirty.store(true, Ordering::Relaxed);
+                                                                    *params.saved_plot_state.lock() = capture_plot_state(
+                                                                        &curve,
+                                                                        current_resolution_ptr.load(Ordering::Relaxed),
+                                                                        current_timebase_ptr.load(Ordering::Relaxed),
+                                                                        linear_ext_enabled_ptr.load(Ordering::Relaxed),
+                                                                        current_oversampling_factor_ptr.load(Ordering::Relaxed),
+                                                                        colored_waveform_ptr.load(Ordering::Relaxed),
+                                                                    );
+                                                                    plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                 }
                                                                 Err(e) => {
                                                                     println!("Failed to load preset: {}", e);
                                                                     *curve = LookupCurve::load_from_bytes(include_bytes!("default.ron"))
                                                                         .unwrap();
                                                                     curve_dirty.store(true, Ordering::Relaxed);
+                                                                    *params.saved_plot_state.lock() = capture_plot_state(
+                                                                        &curve,
+                                                                        current_resolution_ptr.load(Ordering::Relaxed),
+                                                                        current_timebase_ptr.load(Ordering::Relaxed),
+                                                                        linear_ext_enabled_ptr.load(Ordering::Relaxed),
+                                                                        current_oversampling_factor_ptr.load(Ordering::Relaxed),
+                                                                        colored_waveform_ptr.load(Ordering::Relaxed),
+                                                                    );
+                                                                    plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                 }
                                                             }
                                                         }
@@ -1086,4 +1141,25 @@ fn curve_lookup_with_linear_ext(lut: &[f32], input: f32, linear_ext_enabled: boo
         let value = a + fraction * (b - a);
         if value.is_finite() { value } else { a }
     }
+}
+
+fn next_preset_version_name(current_path: &str) -> String {
+    let stem = std::path::Path::new(current_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("Preset");
+
+    if let Some((base, version)) = parse_trailing_version(stem) {
+        format!("{base} v{}", version + 1)
+    } else {
+        format!("{stem} v2")
+    }
+}
+
+fn parse_trailing_version(name: &str) -> Option<(String, usize)> {
+    let trimmed = name.trim();
+    let (base, version_str) = trimmed.rsplit_once(" v")?;
+    let version = version_str.parse().ok()?;
+    Some((base.to_string(), version))
 }
