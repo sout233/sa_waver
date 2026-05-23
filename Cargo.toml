@@ -6,7 +6,7 @@ authors = ["sout <sout233@163.com>"]
 license = "GPL-3.0-or-later"
 
 [workspace]
-members = ["xtask"]
+members = ["xtask", "sa_waver_installer"]
 
 [lib]
 crate-type = ["cdylib", "lib"]
