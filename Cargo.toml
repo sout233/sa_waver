@@ -29,6 +29,7 @@ bevy_lookup_curve = { path = "../bevy_lookup_curve", default-features = false, f
 image = { version = "0.24.5", default-features = false, features = ["png"] }
 directories = "6.0.0"
 parking_lot = "0.12.5"
+serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }

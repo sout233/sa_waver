@@ -16,7 +16,7 @@ use nih_plug_egui::{
 use parking_lot::Mutex;
 
 use crate::{
-    fs, load_image_from_memory,
+    fs, load_image_from_memory, sync_lut_cache_from_state,
     param_knob::ParamKnob,
     sout_ui::{self, SoutTheme},
     WaverPluginParams,
@@ -24,6 +24,7 @@ use crate::{
 
 pub struct EditorData {
     pub lookup_curve: Arc<Mutex<LookupCurve>>,
+    pub curve_dirty: Arc<AtomicBool>,
     pub editor: Arc<Mutex<LookupCurveEguiEditor>>,
     pub lut_cache: Arc<Mutex<Vec<f32>>>,
     // lut_size: usize,
@@ -51,6 +52,7 @@ impl EditorData {
         current_oversampling_factor: Arc<AtomicUsize>,
     ) -> Option<Box<dyn Editor>> {
         let lookup_curve = self.lookup_curve.clone();
+        let curve_dirty = self.curve_dirty.clone();
         let editor = self.editor.clone();
         let lut_cache = self.lut_cache.clone();
         let waveform_buffer = self.waveform_buffer.clone();
@@ -104,6 +106,13 @@ impl EditorData {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(egui::Color32::BLACK).inner_margin(0.0))
                     .show(ctx, |ui| {
+                        sync_lut_cache_from_state(
+                            &lookup_curve,
+                            &curve_dirty,
+                            &lut_cache,
+                            current_resolution_ptr.load(Ordering::Relaxed),
+                        );
+
                         let bg_texture = load_image("background", include_bytes!("../assets/bg.png"));
 
                         let bg_img = egui::Shape::image(
@@ -351,19 +360,13 @@ impl EditorData {
                                                             match LookupCurve::load_from_bytes(&preset_data) {
                                                                 Ok(c) => {
                                                                     *curve = c;
+                                                                    curve_dirty.store(true, Ordering::Relaxed);
                                                                 }
                                                                 Err(e) => {
                                                                     println!("Failed to load preset: {}", e);
                                                                     *curve = LookupCurve::load_from_bytes(include_bytes!("default.ron"))
                                                                         .unwrap();
-                                                                }
-                                                            }
-                                                            if let Some(mut lut) = lut_cache.try_lock() {
-                                                                lut.clear();
-                                                                let lut_size = current_resolution_ptr.load(Ordering::Relaxed);
-                                                                for i in 0..lut_size {
-                                                                    let t = i as f32 / (lut_size - 1) as f32;
-                                                                    lut.push(curve.lookup(t));
+                                                                    curve_dirty.store(true, Ordering::Relaxed);
                                                                 }
                                                             }
                                                         }
@@ -430,14 +433,7 @@ impl EditorData {
                                                         let curve_rect = ui.max_rect();
 
                                                         if editor_ui.ui(ui, &mut curve, sample_for_editor) {
-                                                            if let Some(mut lut) = lut_cache.try_lock() {
-                                                                lut.clear();
-                                                                let lut_size = current_resolution_ptr.load(Ordering::Relaxed);
-                                                                for i in 0..lut_size {
-                                                                    let t = i as f32 / (lut_size - 1) as f32;
-                                                                    lut.push(curve.lookup(t));
-                                                                }
-                                                            }
+                                                            curve_dirty.store(true, Ordering::Relaxed);
                                                         }
 
                                                         let curve_to_screen = |curve_x: f32, curve_y: f32| -> Pos2 {
@@ -605,15 +601,7 @@ impl EditorData {
                                                                     current_resolution_ptr.load(Ordering::Relaxed)
                                                                 );
 
-                                                                if let Some(mut lut) = lut_cache.try_lock() {
-                                                                    lut.clear();
-                                                                    for i in 0..selected_val {
-                                                                        let t = i as f32 / (selected_val - 1) as f32;
-                                                                        if let Some(curve) = lookup_curve.try_lock() {
-                                                                            lut.push(curve.lookup(t));
-                                                                        }
-                                                                    }
-                                                                }
+                                                                curve_dirty.store(true, Ordering::Relaxed);
                                                             }
                                                         },
                                                     );

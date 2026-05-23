@@ -1,5 +1,6 @@
 use bevy_lookup_curve::{editor::LookupCurveEguiEditor, LookupCurve};
 use fundsp::prelude::*;
+use nih_plug::params::persist::PersistentField;
 use nih_plug::prelude::*;
 use nih_plug_egui::egui::ColorImage;
 use nih_plug_egui::EguiState;
@@ -46,6 +47,27 @@ struct WaverPluginParams {
     #[persist = "editor_state"]
     editor_state: Arc<EguiState>,
 
+    #[persist = "lookup_curve"]
+    pub lookup_curve: Arc<Mutex<LookupCurve>>,
+
+    #[persist = "resolution"]
+    pub current_resolution: Arc<AtomicUsize>,
+
+    #[persist = "timebase"]
+    pub current_timebase: Arc<AtomicUsize>,
+
+    #[persist = "linear_ext"]
+    pub linear_ext: Arc<AtomicBool>,
+
+    #[persist = "oversampling_factor"]
+    pub current_oversampling_factor: Arc<AtomicUsize>,
+
+    #[persist = "colored_waveform"]
+    pub colored_waveform: Arc<AtomicBool>,
+
+    #[persist = "current_preset"]
+    pub current_preset: Arc<Mutex<String>>,
+
     pub oversampling_times: Arc<AtomicF32>,
 
     /// The parameter's ID is used to identify the parameter in the wrappred plugin API. As long as
@@ -83,19 +105,24 @@ impl Default for WaverPlugin {
             initial_lut.push(lookup_curve.lookup(t));
         }
 
+        let params = Arc::new(WaverPluginParams::default());
+        params.lookup_curve.set(lookup_curve.clone());
+        *params.current_preset.lock() = String::from("./Default.ron");
+
         Self {
-            params: Arc::new(WaverPluginParams::default()),
+            params: params.clone(),
             // fun_gain,
             // fun_filter_stereo: Box::new(fun_filter_stereo),
             editor_data: EditorData {
-                lookup_curve: Arc::new(Mutex::new(lookup_curve.clone())),
+                lookup_curve: params.lookup_curve.clone(),
+                curve_dirty: Arc::new(AtomicBool::new(true)),
                 editor: Arc::new(Mutex::new(LookupCurveEguiEditor::fitted_to_curve(&lookup_curve))),
                 lut_cache: Arc::new(Mutex::new(initial_lut)),
                 waveform_buffer: Arc::new(Mutex::new(vec![])),
 
-                colored_waveform: Arc::new(AtomicBool::new(false)),
+                colored_waveform: params.colored_waveform.clone(),
                 presets: Arc::new(Mutex::new(Vec::new())),
-                current_preset: Arc::new(Mutex::new(String::from("Default"))),
+                current_preset: params.current_preset.clone(),
 
                 open_save_modal: Arc::new(AtomicBool::new(false)),
                 open_msg_modal: Arc::new(AtomicBool::new(false)),
@@ -104,11 +131,11 @@ impl Default for WaverPlugin {
                 msg_modal_title: Arc::new(Mutex::new(String::new())),
                 msg_modal_content: Arc::new(Mutex::new(String::new())),
             },
-            current_resolution: Arc::new(AtomicUsize::new(1024)),
-            current_timebase: Arc::new(AtomicUsize::new(512)),
-            linear_ext: Arc::new(AtomicBool::new(false)),
+            current_resolution: params.current_resolution.clone(),
+            current_timebase: params.current_timebase.clone(),
+            linear_ext: params.linear_ext.clone(),
             is_bipolar: Arc::new(AtomicBool::new(false)),
-            current_oversampling_factor: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_FACTOR)),
+            current_oversampling_factor: params.current_oversampling_factor.clone(),
             oversampling_times: Arc::new(AtomicF32::new(oversampling_factor_to_times(
                 DEFAULT_OVERSAMPLING_FACTOR,
             ) as f32)),
@@ -125,9 +152,17 @@ impl Default for WaverPluginParams {
     fn default() -> Self {
         let oversampling_times =
             Arc::new(AtomicF32::new(oversampling_factor_to_times(DEFAULT_OVERSAMPLING_FACTOR) as f32));
+        let lookup_curve = LookupCurve::load_from_bytes(include_bytes!("default.ron")).unwrap();
 
         Self {
             editor_state: EguiState::from_size(1040, 520),
+            lookup_curve: Arc::new(Mutex::new(lookup_curve)),
+            current_resolution: Arc::new(AtomicUsize::new(1024)),
+            current_timebase: Arc::new(AtomicUsize::new(512)),
+            linear_ext: Arc::new(AtomicBool::new(false)),
+            current_oversampling_factor: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_FACTOR)),
+            colored_waveform: Arc::new(AtomicBool::new(false)),
+            current_preset: Arc::new(Mutex::new(String::from("./Default.ron"))),
             oversampling_times: oversampling_times.clone(),
 
             pre_gain: FloatParam::new(
@@ -253,6 +288,7 @@ impl Plugin for WaverPlugin {
         let linear_ext_enabled = self.linear_ext.load(Ordering::Relaxed);
         let timebase = self.current_timebase.load(Ordering::Relaxed);
         let oversampling_factor = self.current_oversampling_factor.load(Ordering::Relaxed);
+        let resolution = self.current_resolution.load(Ordering::Relaxed);
         let oversampling_times = oversampling_factor_to_times(oversampling_factor);
         self.params
             .oversampling_times
@@ -261,6 +297,13 @@ impl Plugin for WaverPlugin {
         if let Some(oversampler) = self.oversamplers.first() {
             context.set_latency_samples(oversampler.latency(oversampling_factor));
         }
+
+        sync_lut_cache_from_state(
+            &self.params.lookup_curve,
+            &self.editor_data.curve_dirty,
+            &self.editor_data.lut_cache,
+            resolution,
+        );
 
         if let Some(lut) = self.editor_data.lut_cache.try_lock() {
             let lut_size = lut.len();
@@ -356,6 +399,37 @@ impl Plugin for WaverPlugin {
             self.linear_ext.clone(),
             self.current_oversampling_factor.clone(),
         )
+    }
+}
+
+pub fn rebuild_lut(curve: &LookupCurve, resolution: usize) -> Vec<f32> {
+    let resolution = std::cmp::max(resolution, 2);
+    let mut lut = Vec::with_capacity(resolution);
+    for i in 0..resolution {
+        let t = i as f32 / (resolution - 1) as f32;
+        lut.push(curve.lookup(t));
+    }
+    lut
+}
+
+pub fn sync_lut_cache_from_state(
+    curve_state: &Mutex<LookupCurve>,
+    dirty_flag: &AtomicBool,
+    lut_cache: &Mutex<Vec<f32>>,
+    resolution: usize,
+) {
+    let resolution = std::cmp::max(resolution, 2);
+    let needs_sync = dirty_flag.swap(false, Ordering::Relaxed)
+        || lut_cache.try_lock().map(|lut| lut.len() != resolution).unwrap_or(false);
+
+    if !needs_sync {
+        return;
+    }
+
+    if let (Some(curve), Some(mut lut)) = (curve_state.try_lock(), lut_cache.try_lock()) {
+        *lut = rebuild_lut(&curve, resolution);
+    } else {
+        dirty_flag.store(true, Ordering::Relaxed);
     }
 }
 
