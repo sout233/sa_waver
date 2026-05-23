@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::editor::EditorData;
-use crate::oversampling::Lanczos3Oversampler;
+use crate::oversampling::{ConfigurableOversampler, OversamplingAlgorithm, DEFAULT_OVERSAMPLING_ALGORITHM};
 
 mod editor;
 mod fs;
@@ -37,6 +37,8 @@ pub struct PlotStateSnapshot {
     pub colored_waveform: bool,
     #[serde(default = "default_interpolation_mode")]
     pub interpolation_mode: usize,
+    #[serde(default = "default_oversampling_algorithm")]
+    pub oversampling_algorithm: usize,
 }
 
 pub struct WaverPlugin {
@@ -50,9 +52,11 @@ pub struct WaverPlugin {
     pub current_timebase: Arc<AtomicUsize>,
     pub current_oversampling_factor: Arc<AtomicUsize>,
     pub current_interpolation_mode: Arc<AtomicUsize>,
+    pub current_oversampling_algorithm: Arc<AtomicUsize>,
     pub oversampling_times: Arc<AtomicF32>,
-    pub oversamplers: Vec<Lanczos3Oversampler>,
+    pub oversamplers: Vec<ConfigurableOversampler>,
     pub reported_oversampling_factor: usize,
+    pub reported_oversampling_algorithm: usize,
     // 降采样计数器
     pub sample_counter: usize,
     // 当前块的峰值累加器
@@ -87,6 +91,9 @@ struct WaverPluginParams {
 
     #[persist = "interpolation_mode"]
     pub current_interpolation_mode: Arc<AtomicUsize>,
+
+    #[persist = "oversampling_algorithm"]
+    pub current_oversampling_algorithm: Arc<AtomicUsize>,
 
     #[persist = "current_preset"]
     pub current_preset: Arc<Mutex<String>>,
@@ -144,6 +151,7 @@ impl Default for WaverPlugin {
             DEFAULT_OVERSAMPLING_FACTOR,
             false,
             DEFAULT_INTERPOLATION_MODE,
+            DEFAULT_OVERSAMPLING_ALGORITHM,
         );
         params.plot_dirty.store(false, Ordering::Relaxed);
 
@@ -177,11 +185,13 @@ impl Default for WaverPlugin {
             is_bipolar: Arc::new(AtomicBool::new(false)),
             current_oversampling_factor: params.current_oversampling_factor.clone(),
             current_interpolation_mode: params.current_interpolation_mode.clone(),
+            current_oversampling_algorithm: params.current_oversampling_algorithm.clone(),
             oversampling_times: Arc::new(AtomicF32::new(oversampling_factor_to_times(
                 DEFAULT_OVERSAMPLING_FACTOR,
             ) as f32)),
             oversamplers: Vec::new(),
             reported_oversampling_factor: usize::MAX,
+            reported_oversampling_algorithm: usize::MAX,
             sample_counter: 0,
             current_chunk_peak: 0.0,
             input_peak_follower: 0.0,
@@ -205,6 +215,7 @@ impl Default for WaverPluginParams {
             current_oversampling_factor: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_FACTOR)),
             colored_waveform: Arc::new(AtomicBool::new(false)),
             current_interpolation_mode: Arc::new(AtomicUsize::new(DEFAULT_INTERPOLATION_MODE)),
+            current_oversampling_algorithm: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_ALGORITHM)),
             current_preset: Arc::new(Mutex::new(String::from("./Default.ron"))),
             saved_plot_state: Arc::new(Mutex::new(PlotStateSnapshot {
                 curve: lookup_curve.clone(),
@@ -214,6 +225,7 @@ impl Default for WaverPluginParams {
                 oversampling_factor: DEFAULT_OVERSAMPLING_FACTOR,
                 colored_waveform: false,
                 interpolation_mode: DEFAULT_INTERPOLATION_MODE,
+                oversampling_algorithm: DEFAULT_OVERSAMPLING_ALGORITHM,
             })),
             plot_dirty: Arc::new(AtomicBool::new(false)),
             oversampling_times: oversampling_times.clone(),
@@ -316,9 +328,7 @@ impl Plugin for WaverPlugin {
             .expect("Plugin was initialized without any outputs")
             .get() as usize;
 
-        self.oversamplers.resize_with(num_channels, || {
-            Lanczos3Oversampler::new(buffer_config.max_buffer_size as usize, MAX_OVERSAMPLING_FACTOR)
-        });
+        self.rebuild_oversamplers(num_channels, buffer_config.max_buffer_size as usize);
 
         if let Some(oversampler) = self.oversamplers.first() {
             context.set_latency_samples(
@@ -326,6 +336,7 @@ impl Plugin for WaverPlugin {
             );
         }
         self.reported_oversampling_factor = self.current_oversampling_factor.load(Ordering::Relaxed);
+        self.reported_oversampling_algorithm = self.current_oversampling_algorithm.load(Ordering::Relaxed);
 
         true
     }
@@ -343,17 +354,29 @@ impl Plugin for WaverPlugin {
         let timebase = self.current_timebase.load(Ordering::Relaxed);
         let oversampling_factor = self.current_oversampling_factor.load(Ordering::Relaxed);
         let interpolation_mode = self.current_interpolation_mode.load(Ordering::Relaxed);
+        let oversampling_algorithm = self.current_oversampling_algorithm.load(Ordering::Relaxed);
         let resolution = self.current_resolution.load(Ordering::Relaxed);
         let oversampling_times = oversampling_factor_to_times(oversampling_factor);
         self.params
             .oversampling_times
             .store(oversampling_times as f32, Ordering::Relaxed);
 
+        if oversampling_algorithm != self.reported_oversampling_algorithm {
+            self.reported_oversampling_algorithm = oversampling_algorithm;
+            let num_channels = self.oversamplers.len();
+            if num_channels > 0 {
+                self.rebuild_oversamplers(num_channels, buffer.samples());
+            }
+            if let Some(oversampler) = self.oversamplers.first() {
+                context.set_latency_samples(oversampler.latency(oversampling_factor));
+            }
+        }
+
         if oversampling_factor != self.reported_oversampling_factor {
             self.reported_oversampling_factor = oversampling_factor;
-        if let Some(oversampler) = self.oversamplers.first() {
-            context.set_latency_samples(oversampler.latency(oversampling_factor));
-        }
+            if let Some(oversampler) = self.oversamplers.first() {
+                context.set_latency_samples(oversampler.latency(oversampling_factor));
+            }
         }
 
         sync_lut_cache_from_state(
@@ -455,7 +478,19 @@ impl Plugin for WaverPlugin {
             self.linear_ext.clone(),
             self.current_oversampling_factor.clone(),
             self.current_interpolation_mode.clone(),
+            self.current_oversampling_algorithm.clone(),
         )
+    }
+}
+
+impl WaverPlugin {
+    fn rebuild_oversamplers(&mut self, num_channels: usize, maximum_block_size: usize) {
+        let algorithm = OversamplingAlgorithm::from_index(
+            self.current_oversampling_algorithm.load(Ordering::Relaxed),
+        );
+        self.oversamplers = (0..num_channels)
+            .map(|_| ConfigurableOversampler::new(maximum_block_size, MAX_OVERSAMPLING_FACTOR, algorithm))
+            .collect();
     }
 }
 
@@ -478,6 +513,7 @@ pub fn capture_plot_state(
     oversampling_factor: usize,
     colored_waveform: bool,
     interpolation_mode: usize,
+    oversampling_algorithm: usize,
 ) -> PlotStateSnapshot {
     PlotStateSnapshot {
         curve: curve.clone(),
@@ -487,6 +523,7 @@ pub fn capture_plot_state(
         oversampling_factor,
         colored_waveform,
         interpolation_mode,
+        oversampling_algorithm,
     }
 }
 
@@ -499,6 +536,7 @@ pub fn plot_state_matches(
     oversampling_factor: usize,
     colored_waveform: bool,
     interpolation_mode: usize,
+    oversampling_algorithm: usize,
 ) -> bool {
     snapshot.resolution == resolution
         && snapshot.timebase == timebase
@@ -506,6 +544,7 @@ pub fn plot_state_matches(
         && snapshot.oversampling_factor == oversampling_factor
         && snapshot.colored_waveform == colored_waveform
         && snapshot.interpolation_mode == interpolation_mode
+        && snapshot.oversampling_algorithm == oversampling_algorithm
         && curves_match(&snapshot.curve, curve)
 }
 
@@ -618,6 +657,10 @@ pub fn sample_lut(lut: &[f32], index: usize, fraction: f32, interpolation_mode: 
 
 const fn default_interpolation_mode() -> usize {
     DEFAULT_INTERPOLATION_MODE
+}
+
+const fn default_oversampling_algorithm() -> usize {
+    DEFAULT_OVERSAMPLING_ALGORITHM
 }
 
 impl ClapPlugin for WaverPlugin {

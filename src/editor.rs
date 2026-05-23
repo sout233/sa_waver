@@ -18,6 +18,7 @@ use parking_lot::Mutex;
 
 use crate::{
     capture_plot_state, fs, load_image_from_memory, sample_lut, sync_lut_cache_from_state,
+    oversampling::{OVERSAMPLING_ALGORITHM_FLAT_FIR, OVERSAMPLING_ALGORITHM_LANCZOS3},
     param_knob::ParamKnob,
     sout_ui::{self, SoutTheme},
     WaverPluginParams, INTERPOLATION_MODE_COSINE, INTERPOLATION_MODE_HERMITE, INTERPOLATION_MODE_LINEAR,
@@ -61,6 +62,7 @@ impl EditorData {
         linear_ext: Arc<AtomicBool>,
         current_oversampling_factor: Arc<AtomicUsize>,
         current_interpolation_mode: Arc<AtomicUsize>,
+        current_oversampling_algorithm: Arc<AtomicUsize>,
     ) -> Option<Box<dyn Editor>> {
         let lookup_curve = self.lookup_curve.clone();
         let curve_dirty = self.curve_dirty.clone();
@@ -77,6 +79,7 @@ impl EditorData {
         let linear_ext_enabled_ptr = linear_ext.clone();
         let current_oversampling_factor_ptr = current_oversampling_factor.clone();
         let current_interpolation_mode_ptr = current_interpolation_mode.clone();
+        let current_oversampling_algorithm_ptr = current_oversampling_algorithm.clone();
         let open_save_modal_ptr = self.open_save_modal.clone();
         let open_msg_modal_ptr = self.open_msg_modal.clone();
         let open_about_modal_ptr = self.open_about_modal.clone();
@@ -275,6 +278,8 @@ impl EditorData {
                                                                                         colored_waveform_ptr.load(Ordering::Relaxed),
                                                                                         current_interpolation_mode_ptr
                                                                                             .load(Ordering::Relaxed),
+                                                                                        current_oversampling_algorithm_ptr
+                                                                                            .load(Ordering::Relaxed),
                                                                                     );
                                                                                     plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                                     let presets = fs::get_presets().unwrap_or_default();
@@ -381,7 +386,7 @@ impl EditorData {
 
                                             if open_settings_modal_ptr.load(Ordering::Relaxed) {
                                                 let modal = Modal::new(Id::new("Settings Modal")).show(ui.ctx(), |ui| {
-                                                    ui.set_width(320.0);
+                                                    ui.set_width(340.0);
                                                     ui.heading("Settings");
                                                     ui.add_space(8.0);
                                                     ui.label("Interpolation");
@@ -423,6 +428,45 @@ impl EditorData {
                                                         if selected_mode != current_mode {
                                                             current_interpolation_mode_ptr
                                                                 .store(selected_mode, Ordering::Relaxed);
+                                                            plot_dirty_ptr.store(true, Ordering::Relaxed);
+                                                        }
+                                                    });
+
+                                                    ui.add_space(12.0);
+                                                    ui.label("Oversampling");
+                                                    ui.add_space(6.0);
+
+                                                    ui.scope(|ui| {
+                                                        let visuals = ui.visuals_mut();
+                                                        sout_ui::make_combobox_visuals(
+                                                            visuals,
+                                                            Color32::from_hex("#554e4a").unwrap(),
+                                                        );
+                                                        ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                        let current_algo = current_oversampling_algorithm_ptr
+                                                            .load(Ordering::Relaxed);
+                                                        let mut selected_algo = current_algo;
+
+                                                        egui::ComboBox::from_id_salt("settings_oversampling_algorithm_selector")
+                                                            .width(220.0)
+                                                            .selected_text(oversampling_algorithm_label(current_algo))
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(
+                                                                    &mut selected_algo,
+                                                                    OVERSAMPLING_ALGORITHM_LANCZOS3,
+                                                                    "Lanczos3",
+                                                                );
+                                                                ui.selectable_value(
+                                                                    &mut selected_algo,
+                                                                    OVERSAMPLING_ALGORITHM_FLAT_FIR,
+                                                                    "Flat FIR",
+                                                                );
+                                                            });
+
+                                                        if selected_algo != current_algo {
+                                                            current_oversampling_algorithm_ptr
+                                                                .store(selected_algo, Ordering::Relaxed);
                                                             plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                         }
                                                     });
@@ -511,6 +555,8 @@ impl EditorData {
                                                                         colored_waveform_ptr.load(Ordering::Relaxed),
                                                                         current_interpolation_mode_ptr
                                                                             .load(Ordering::Relaxed),
+                                                                        current_oversampling_algorithm_ptr
+                                                                            .load(Ordering::Relaxed),
                                                                     );
                                                                     plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                 }
@@ -527,6 +573,8 @@ impl EditorData {
                                                                         current_oversampling_factor_ptr.load(Ordering::Relaxed),
                                                                         colored_waveform_ptr.load(Ordering::Relaxed),
                                                                         current_interpolation_mode_ptr
+                                                                            .load(Ordering::Relaxed),
+                                                                        current_oversampling_algorithm_ptr
                                                                             .load(Ordering::Relaxed),
                                                                     );
                                                                     plot_dirty_ptr.store(false, Ordering::Relaxed);
@@ -1266,6 +1314,14 @@ fn interpolation_mode_label(mode: usize) -> &'static str {
         INTERPOLATION_MODE_COSINE => "Cosine",
         INTERPOLATION_MODE_HERMITE => "Hermite",
         _ => "Linear",
+    }
+}
+
+fn oversampling_algorithm_label(mode: usize) -> &'static str {
+    match mode {
+        OVERSAMPLING_ALGORITHM_LANCZOS3 => "Lanczos3",
+        OVERSAMPLING_ALGORITHM_FLAT_FIR => "Flat FIR",
+        _ => "Lanczos3",
     }
 }
 
