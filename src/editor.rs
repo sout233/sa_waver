@@ -17,10 +17,10 @@ use nih_plug_egui::{
 use parking_lot::Mutex;
 
 use crate::{
-    capture_plot_state, fs, load_image_from_memory, sync_lut_cache_from_state,
+    capture_plot_state, fs, load_image_from_memory, sample_lut, sync_lut_cache_from_state,
     param_knob::ParamKnob,
     sout_ui::{self, SoutTheme},
-    WaverPluginParams,
+    WaverPluginParams, INTERPOLATION_MODE_COSINE, INTERPOLATION_MODE_HERMITE, INTERPOLATION_MODE_LINEAR,
 };
 
 pub struct EditorData {
@@ -39,6 +39,7 @@ pub struct EditorData {
     pub open_save_modal: Arc<AtomicBool>,
     pub open_msg_modal: Arc<AtomicBool>,
     pub open_about_modal: Arc<AtomicBool>,
+    pub open_settings_modal: Arc<AtomicBool>,
     pub msg_modal_title: Arc<Mutex<String>>,
     pub msg_modal_content: Arc<Mutex<String>>,
 }
@@ -59,6 +60,7 @@ impl EditorData {
         current_timebase: Arc<AtomicUsize>,
         linear_ext: Arc<AtomicBool>,
         current_oversampling_factor: Arc<AtomicUsize>,
+        current_interpolation_mode: Arc<AtomicUsize>,
     ) -> Option<Box<dyn Editor>> {
         let lookup_curve = self.lookup_curve.clone();
         let curve_dirty = self.curve_dirty.clone();
@@ -74,9 +76,11 @@ impl EditorData {
         let current_timebase_ptr = current_timebase.clone();
         let linear_ext_enabled_ptr = linear_ext.clone();
         let current_oversampling_factor_ptr = current_oversampling_factor.clone();
+        let current_interpolation_mode_ptr = current_interpolation_mode.clone();
         let open_save_modal_ptr = self.open_save_modal.clone();
         let open_msg_modal_ptr = self.open_msg_modal.clone();
         let open_about_modal_ptr = self.open_about_modal.clone();
+        let open_settings_modal_ptr = self.open_settings_modal.clone();
         let saving_preset_name_ptr = self.saving_preset_name.clone();
         let msg_modal_title_ptr = self.msg_modal_title.clone();
         let msg_modal_content_ptr = self.msg_modal_content.clone();
@@ -172,6 +176,24 @@ impl EditorData {
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             ui.add_space(2.0);
 
+                                            ui.scope(|ui| {
+                                                let visuals = ui.visuals_mut();
+                                                sout_ui::make_ghost_button_visuals(visuals);
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(
+                                                            RichText::new("")
+                                                                .size(14.0)
+                                                                .color(Color32::from_hex("#FFEAD0").unwrap()),
+                                                        )
+                                                        .min_size(egui::vec2(24.0, 24.0)),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    open_about_modal_ptr.store(true, Ordering::Relaxed);
+                                                }
+                                            });
+
                                             // ghost_button(ui, "".into());
 
                                             let img_size = egui::vec2(12.0, 12.0);
@@ -251,6 +273,8 @@ impl EditorData {
                                                                                         linear_ext_enabled_ptr.load(Ordering::Relaxed),
                                                                                         current_oversampling_factor_ptr.load(Ordering::Relaxed),
                                                                                         colored_waveform_ptr.load(Ordering::Relaxed),
+                                                                                        current_interpolation_mode_ptr
+                                                                                            .load(Ordering::Relaxed),
                                                                                     );
                                                                                     plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                                     let presets = fs::get_presets().unwrap_or_default();
@@ -355,6 +379,72 @@ impl EditorData {
                                                 }
                                             }
 
+                                            if open_settings_modal_ptr.load(Ordering::Relaxed) {
+                                                let modal = Modal::new(Id::new("Settings Modal")).show(ui.ctx(), |ui| {
+                                                    ui.set_width(320.0);
+                                                    ui.heading("Settings");
+                                                    ui.add_space(8.0);
+                                                    ui.label("Interpolation");
+                                                    ui.add_space(6.0);
+
+                                                    ui.scope(|ui| {
+                                                        let visuals = ui.visuals_mut();
+                                                        sout_ui::make_combobox_visuals(
+                                                            visuals,
+                                                            Color32::from_hex("#554e4a").unwrap(),
+                                                        );
+                                                        ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                        let current_mode = current_interpolation_mode_ptr
+                                                            .load(Ordering::Relaxed);
+                                                        let mut selected_mode = current_mode;
+
+                                                        egui::ComboBox::from_id_salt("settings_interpolation_selector")
+                                                            .width(220.0)
+                                                            .selected_text(interpolation_mode_label(current_mode))
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(
+                                                                    &mut selected_mode,
+                                                                    INTERPOLATION_MODE_LINEAR,
+                                                                    "Linear",
+                                                                );
+                                                                ui.selectable_value(
+                                                                    &mut selected_mode,
+                                                                    INTERPOLATION_MODE_COSINE,
+                                                                    "Cosine",
+                                                                );
+                                                                ui.selectable_value(
+                                                                    &mut selected_mode,
+                                                                    INTERPOLATION_MODE_HERMITE,
+                                                                    "Hermite",
+                                                                );
+                                                            });
+
+                                                        if selected_mode != current_mode {
+                                                            current_interpolation_mode_ptr
+                                                                .store(selected_mode, Ordering::Relaxed);
+                                                            plot_dirty_ptr.store(true, Ordering::Relaxed);
+                                                        }
+                                                    });
+
+                                                    ui.add_space(6.0);
+
+                                                    egui::Sides::new().show(
+                                                        ui,
+                                                        |_ui| {},
+                                                        |ui| {
+                                                            if ui.button("Close").clicked() {
+                                                                open_settings_modal_ptr.store(false, Ordering::Relaxed);
+                                                            }
+                                                        },
+                                                    );
+                                                });
+
+                                                if modal.should_close() {
+                                                    open_settings_modal_ptr.store(false, Ordering::Relaxed);
+                                                }
+                                            }
+
                                             ui.add_space(2.0);
 
                                             ui.scope(|ui| {
@@ -419,6 +509,8 @@ impl EditorData {
                                                                         linear_ext_enabled_ptr.load(Ordering::Relaxed),
                                                                         current_oversampling_factor_ptr.load(Ordering::Relaxed),
                                                                         colored_waveform_ptr.load(Ordering::Relaxed),
+                                                                        current_interpolation_mode_ptr
+                                                                            .load(Ordering::Relaxed),
                                                                     );
                                                                     plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                 }
@@ -434,6 +526,8 @@ impl EditorData {
                                                                         linear_ext_enabled_ptr.load(Ordering::Relaxed),
                                                                         current_oversampling_factor_ptr.load(Ordering::Relaxed),
                                                                         colored_waveform_ptr.load(Ordering::Relaxed),
+                                                                        current_interpolation_mode_ptr
+                                                                            .load(Ordering::Relaxed),
                                                                     );
                                                                     plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                 }
@@ -522,7 +616,13 @@ impl EditorData {
                                                         if should_draw_manual_indicator {
                                                             if let Some(lut) = lut_cache.try_lock() {
                                                                 let curve_y =
-                                                                    curve_lookup_with_linear_ext(&lut, current_t, linear_ext_enabled);
+                                                                    curve_lookup_with_linear_ext(
+                                                                        &lut,
+                                                                        current_t,
+                                                                        linear_ext_enabled,
+                                                                        current_interpolation_mode_ptr
+                                                                            .load(Ordering::Relaxed),
+                                                                    );
                                                                 if !curve_y.is_finite() {
                                                                     display_output_y = None;
                                                                     output_y = None;
@@ -921,29 +1021,24 @@ impl EditorData {
                                                                     ui.set_width(ui.available_width());
                                                                     ui.set_height(ui.available_height());
 
+                                                                    let text_color = Color32::from_hex("#FFEAD0").unwrap();
+
+                                                                    let button = egui::Button::new(
+                                                                        RichText::new("Settings").color(text_color),
+                                                                    )
+                                                                    .min_size(ui.available_size());
+
                                                                     if ui
                                                                         .with_layout(
                                                                             egui::Layout::centered_and_justified(
                                                                                 egui::Direction::LeftToRight,
                                                                             ),
-                                                                            |ui| {
-                                                                                ui.add_sized(
-                                                                                    ui.available_size(),
-                                                                                    egui::Button::new(
-                                                                                        RichText::new(" About").color(
-                                                                                            Color32::from_hex("#FFEAD0")
-                                                                                                .unwrap(),
-                                                                                        ),
-                                                                                    )
-                                                                                    .wrap_mode(egui::TextWrapMode::Extend)
-                                                                                    .min_size(ui.available_size()),
-                                                                                )
-                                                                            },
+                                                                            |ui| ui.add_sized(ui.available_size(), button),
                                                                         )
                                                                         .inner
                                                                         .clicked()
                                                                     {
-                                                                        open_about_modal_ptr.store(true, Ordering::Relaxed);
+                                                                        open_settings_modal_ptr.store(true, Ordering::Relaxed);
                                                                     }
                                                                 },
                                                             );
@@ -1127,7 +1222,12 @@ fn waveform(ui: &mut egui::Ui, waveform_buffer: Arc<Mutex<VecDeque<f32>>>, timeb
     });
 }
 
-fn curve_lookup_with_linear_ext(lut: &[f32], input: f32, linear_ext_enabled: bool) -> f32 {
+fn curve_lookup_with_linear_ext(
+    lut: &[f32],
+    input: f32,
+    linear_ext_enabled: bool,
+    interpolation_mode: usize,
+) -> f32 {
     if lut.is_empty() {
         return 0.0;
     }
@@ -1156,10 +1256,16 @@ fn curve_lookup_with_linear_ext(lut: &[f32], input: f32, linear_ext_enabled: boo
             lut[lut_size - 1]
         }
     } else {
-        let a = lut[index];
-        let b = lut[index + 1];
-        let value = a + fraction * (b - a);
-        if value.is_finite() { value } else { a }
+        sample_lut(lut, index, fraction, interpolation_mode)
+    }
+}
+
+fn interpolation_mode_label(mode: usize) -> &'static str {
+    match mode {
+        INTERPOLATION_MODE_LINEAR => "Linear",
+        INTERPOLATION_MODE_COSINE => "Cosine",
+        INTERPOLATION_MODE_HERMITE => "Hermite",
+        _ => "Linear",
     }
 }
 

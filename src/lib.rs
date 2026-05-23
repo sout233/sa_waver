@@ -22,6 +22,10 @@ mod sout_ui;
 
 const MAX_OVERSAMPLING_FACTOR: usize = 3;
 const DEFAULT_OVERSAMPLING_FACTOR: usize = 0;
+pub const INTERPOLATION_MODE_LINEAR: usize = 0;
+pub const INTERPOLATION_MODE_COSINE: usize = 1;
+pub const INTERPOLATION_MODE_HERMITE: usize = 2;
+pub const DEFAULT_INTERPOLATION_MODE: usize = INTERPOLATION_MODE_LINEAR;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PlotStateSnapshot {
@@ -31,6 +35,8 @@ pub struct PlotStateSnapshot {
     pub linear_ext: bool,
     pub oversampling_factor: usize,
     pub colored_waveform: bool,
+    #[serde(default = "default_interpolation_mode")]
+    pub interpolation_mode: usize,
 }
 
 pub struct WaverPlugin {
@@ -43,6 +49,7 @@ pub struct WaverPlugin {
     pub current_resolution: Arc<AtomicUsize>,
     pub current_timebase: Arc<AtomicUsize>,
     pub current_oversampling_factor: Arc<AtomicUsize>,
+    pub current_interpolation_mode: Arc<AtomicUsize>,
     pub oversampling_times: Arc<AtomicF32>,
     pub oversamplers: Vec<Lanczos3Oversampler>,
     pub reported_oversampling_factor: usize,
@@ -77,6 +84,9 @@ struct WaverPluginParams {
 
     #[persist = "colored_waveform"]
     pub colored_waveform: Arc<AtomicBool>,
+
+    #[persist = "interpolation_mode"]
+    pub current_interpolation_mode: Arc<AtomicUsize>,
 
     #[persist = "current_preset"]
     pub current_preset: Arc<Mutex<String>>,
@@ -133,6 +143,7 @@ impl Default for WaverPlugin {
             false,
             DEFAULT_OVERSAMPLING_FACTOR,
             false,
+            DEFAULT_INTERPOLATION_MODE,
         );
         params.plot_dirty.store(false, Ordering::Relaxed);
 
@@ -155,6 +166,7 @@ impl Default for WaverPlugin {
                 open_save_modal: Arc::new(AtomicBool::new(false)),
                 open_msg_modal: Arc::new(AtomicBool::new(false)),
                 open_about_modal: Arc::new(AtomicBool::new(false)),
+                open_settings_modal: Arc::new(AtomicBool::new(false)),
                 saving_preset_name: Arc::new(Mutex::new(String::new())),
                 msg_modal_title: Arc::new(Mutex::new(String::new())),
                 msg_modal_content: Arc::new(Mutex::new(String::new())),
@@ -164,6 +176,7 @@ impl Default for WaverPlugin {
             linear_ext: params.linear_ext.clone(),
             is_bipolar: Arc::new(AtomicBool::new(false)),
             current_oversampling_factor: params.current_oversampling_factor.clone(),
+            current_interpolation_mode: params.current_interpolation_mode.clone(),
             oversampling_times: Arc::new(AtomicF32::new(oversampling_factor_to_times(
                 DEFAULT_OVERSAMPLING_FACTOR,
             ) as f32)),
@@ -191,6 +204,7 @@ impl Default for WaverPluginParams {
             linear_ext: Arc::new(AtomicBool::new(false)),
             current_oversampling_factor: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_FACTOR)),
             colored_waveform: Arc::new(AtomicBool::new(false)),
+            current_interpolation_mode: Arc::new(AtomicUsize::new(DEFAULT_INTERPOLATION_MODE)),
             current_preset: Arc::new(Mutex::new(String::from("./Default.ron"))),
             saved_plot_state: Arc::new(Mutex::new(PlotStateSnapshot {
                 curve: lookup_curve.clone(),
@@ -199,6 +213,7 @@ impl Default for WaverPluginParams {
                 linear_ext: false,
                 oversampling_factor: DEFAULT_OVERSAMPLING_FACTOR,
                 colored_waveform: false,
+                interpolation_mode: DEFAULT_INTERPOLATION_MODE,
             })),
             plot_dirty: Arc::new(AtomicBool::new(false)),
             oversampling_times: oversampling_times.clone(),
@@ -327,6 +342,7 @@ impl Plugin for WaverPlugin {
         let linear_ext_enabled = self.linear_ext.load(Ordering::Relaxed);
         let timebase = self.current_timebase.load(Ordering::Relaxed);
         let oversampling_factor = self.current_oversampling_factor.load(Ordering::Relaxed);
+        let interpolation_mode = self.current_interpolation_mode.load(Ordering::Relaxed);
         let resolution = self.current_resolution.load(Ordering::Relaxed);
         let oversampling_times = oversampling_factor_to_times(oversampling_factor);
         self.params
@@ -389,9 +405,7 @@ impl Plugin for WaverPlugin {
                                     lut[lut_size - 1]
                                 }
                             } else {
-                                let a = lut[index];
-                                let b = lut[index + 1];
-                                a + fraction * (b - a)
+                                sample_lut(lut.as_slice(), index, fraction, interpolation_mode)
                             };
 
                             let shaped = curve_val * sign;
@@ -440,6 +454,7 @@ impl Plugin for WaverPlugin {
             self.current_timebase.clone(),
             self.linear_ext.clone(),
             self.current_oversampling_factor.clone(),
+            self.current_interpolation_mode.clone(),
         )
     }
 }
@@ -462,6 +477,7 @@ pub fn capture_plot_state(
     linear_ext: bool,
     oversampling_factor: usize,
     colored_waveform: bool,
+    interpolation_mode: usize,
 ) -> PlotStateSnapshot {
     PlotStateSnapshot {
         curve: curve.clone(),
@@ -470,6 +486,7 @@ pub fn capture_plot_state(
         linear_ext,
         oversampling_factor,
         colored_waveform,
+        interpolation_mode,
     }
 }
 
@@ -481,12 +498,14 @@ pub fn plot_state_matches(
     linear_ext: bool,
     oversampling_factor: usize,
     colored_waveform: bool,
+    interpolation_mode: usize,
 ) -> bool {
     snapshot.resolution == resolution
         && snapshot.timebase == timebase
         && snapshot.linear_ext == linear_ext
         && snapshot.oversampling_factor == oversampling_factor
         && snapshot.colored_waveform == colored_waveform
+        && snapshot.interpolation_mode == interpolation_mode
         && curves_match(&snapshot.curve, curve)
 }
 
@@ -548,6 +567,57 @@ fn load_image_from_memory(image_data: &[u8]) -> Result<ColorImage, Box<dyn Error
     let image_buffer = image.to_rgba8();
     let pixels = image_buffer.as_flat_samples();
     Ok(ColorImage::from_rgba_unmultiplied(size, pixels.as_slice()))
+}
+
+pub fn sample_lut(lut: &[f32], index: usize, fraction: f32, interpolation_mode: usize) -> f32 {
+    if lut.is_empty() {
+        return 0.0;
+    }
+
+    let idx = std::cmp::Ord::min(index, lut.len().saturating_sub(1));
+    let a = lut[idx];
+    let b = lut[std::cmp::Ord::min(idx + 1, lut.len() - 1)];
+    let t = fraction.clamp(0.0, 1.0);
+
+    match interpolation_mode {
+        INTERPOLATION_MODE_LINEAR => {
+            let value = a + t * (b - a);
+            if value.is_finite() { value } else { a }
+        }
+        INTERPOLATION_MODE_COSINE => {
+            let mu = (1.0 - (t * std::f32::consts::PI).cos()) * 0.5;
+            let value = a * (1.0 - mu) + b * mu;
+            if value.is_finite() { value } else { a }
+        }
+        INTERPOLATION_MODE_HERMITE if lut.len() >= 4 && idx < lut.len().saturating_sub(1) => {
+            let y0 = lut[idx.saturating_sub(1)];
+            let y1 = lut[idx];
+            let y2 = lut[idx + 1];
+            let y3 = lut[std::cmp::Ord::min(idx + 2, lut.len() - 1)];
+
+            let t2 = t * t;
+            let t3 = t2 * t;
+
+            let m1 = 0.5 * (y2 - y0);
+            let m2 = 0.5 * (y3 - y1);
+
+            let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+            let h10 = t3 - 2.0 * t2 + t;
+            let h01 = -2.0 * t3 + 3.0 * t2;
+            let h11 = t3 - t2;
+
+            let value = h00 * y1 + h10 * m1 + h01 * y2 + h11 * m2;
+            if value.is_finite() { value } else { y1 }
+        }
+        _ => {
+            let value = a + t * (b - a);
+            if value.is_finite() { value } else { a }
+        }
+    }
+}
+
+const fn default_interpolation_mode() -> usize {
+    DEFAULT_INTERPOLATION_MODE
 }
 
 impl ClapPlugin for WaverPlugin {
