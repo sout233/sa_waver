@@ -41,6 +41,8 @@ pub struct EditorData {
     pub open_msg_modal: Arc<AtomicBool>,
     pub open_about_modal: Arc<AtomicBool>,
     pub open_settings_modal: Arc<AtomicBool>,
+    pub help_panel_title: Arc<Mutex<String>>,
+    pub help_panel_text: Arc<Mutex<String>>,
     pub msg_modal_title: Arc<Mutex<String>>,
     pub msg_modal_content: Arc<Mutex<String>>,
 }
@@ -84,6 +86,8 @@ impl EditorData {
         let open_msg_modal_ptr = self.open_msg_modal.clone();
         let open_about_modal_ptr = self.open_about_modal.clone();
         let open_settings_modal_ptr = self.open_settings_modal.clone();
+        let help_panel_title_ptr = self.help_panel_title.clone();
+        let help_panel_text_ptr = self.help_panel_text.clone();
         let saving_preset_name_ptr = self.saving_preset_name.clone();
         let msg_modal_title_ptr = self.msg_modal_title.clone();
         let msg_modal_content_ptr = self.msg_modal_content.clone();
@@ -143,6 +147,19 @@ impl EditorData {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(egui::Color32::BLACK).inner_margin(0.0))
                     .show(ctx, |ui| {
+                        let default_help_title = "SA Waver";
+                        let default_help_text = "by sout audio";
+                        let mut hovered_help_title: Option<&'static str> = None;
+                        let mut hovered_help_text: Option<&'static str> = None;
+                        let current_help_title = help_panel_title_ptr
+                            .try_lock()
+                            .map(|text| text.clone())
+                            .unwrap_or_else(|| default_help_title.to_string());
+                        let current_help_text = help_panel_text_ptr
+                            .try_lock()
+                            .map(|text| text.clone())
+                            .unwrap_or_else(|| default_help_text.to_string());
+
                         sync_lut_cache_from_state(
                             &lookup_curve,
                             &curve_dirty,
@@ -551,6 +568,11 @@ impl EditorData {
                                                         })
                                                         .response;
 
+                                                    if response.hovered() {
+                                                        hovered_help_title = Some("Preset");
+                                                        hovered_help_text = Some("Load a saved preset. A star means the current state is unsaved.");
+                                                    }
+
                                                     if *current_preset_guard != previous_preset {
                                                         println!("Preset changed to: {}", *current_preset_guard);
 
@@ -782,9 +804,41 @@ impl EditorData {
                                                 ui.add_space(16.0);
 
                                                 ui.vertical(|ui| {
-                                                    ui.add_space(16.0);
-                                                    ui.heading("Waver");
-                                                    ui.label("by sout audio");
+                                                    ui.add_space(12.0);
+
+                                                    ui.allocate_ui_with_layout(
+                                                        egui::vec2(308.0, 50.0),
+                                                        egui::Layout::top_down(egui::Align::Min),
+                                                        |ui| {
+                                                            ui.set_width(ui.available_width());
+                                                            ui.style_mut().spacing.item_spacing.y = 2.0;
+
+                                                            let help_title_size = if current_help_title == default_help_title {
+                                                                20.0
+                                                            } else {
+                                                                14.0
+                                                            };
+
+                                                            ui.label(
+                                                                RichText::new(current_help_title.as_str())
+                                                                    .size(help_title_size)
+                                                                    .color(Color32::from_hex("#FFEAD0").unwrap()),
+                                                            );
+                                                            ui.add_space(1.0);
+                                                            ui.add(
+                                                                egui::Label::new(
+                                                                    RichText::new(current_help_text.as_str())
+                                                                        .size(13.0)
+                                                                        .color(
+                                                                            Color32::from_hex("#FFEAD0")
+                                                                                .unwrap()
+                                                                                .gamma_multiply(0.85),
+                                                                        ),
+                                                                )
+                                                                .wrap(),
+                                                            );
+                                                        },
+                                                    );
                                                 });
                                             });
                                         });
@@ -815,7 +869,7 @@ impl EditorData {
                                                             let current_val = current_resolution_ptr.load(Ordering::Relaxed);
                                                             let mut selected_val = current_val;
 
-                                                            let _response = egui::ComboBox::from_id_salt("resolution_selector")
+                                                            let response = egui::ComboBox::from_id_salt("resolution_selector")
                                                                 .width(100.0)
                                                                 .selected_text(format!("{}", selected_val))
                                                                 .show_ui(ui, |ui| {
@@ -834,7 +888,13 @@ impl EditorData {
                                                                                 .range(256..=4096 * 2),
                                                                         );
                                                                     });
-                                                                });
+                                                                })
+                                                                .response;
+
+                                                            if response.hovered() {
+                                                                hovered_help_title = Some("Resolution");
+                                                                hovered_help_text = Some("Set LUT size for the curve. Higher values reduce lookup error.");
+                                                            }
 
                                                             if selected_val != current_val {
                                                                 current_resolution_ptr.store(selected_val, Ordering::Relaxed);
@@ -888,16 +948,21 @@ impl EditorData {
                                                             )
                                                             .min_size(ui.available_size());
 
-                                                            if ui
+                                                            let response = ui
                                                                 .with_layout(
                                                                     egui::Layout::centered_and_justified(
                                                                         egui::Direction::LeftToRight,
                                                                     ),
                                                                     |ui| ui.add_sized(ui.available_size(), button),
                                                                 )
-                                                                .inner
-                                                                .clicked()
-                                                            {
+                                                                .inner;
+
+                                                            if response.hovered() {
+                                                                hovered_help_title = Some("Colorful");
+                                                                hovered_help_text = Some("Color the output history by level to reveal clipping and dynamics.");
+                                                            }
+
+                                                            if response.clicked() {
                                                                 println!("󰉦 Colorful clicked");
                                                                 colored_waveform_ptr.store(
                                                                     !colored_waveform_ptr.load(Ordering::Relaxed),
@@ -932,7 +997,7 @@ impl EditorData {
                                                                     let current_val = current_timebase_ptr.load(Ordering::Relaxed);
                                                                     let mut selected_val = current_val;
 
-                                                                    let _response = egui::ComboBox::from_id_salt("timebase_selector")
+                                                                    let response = egui::ComboBox::from_id_salt("timebase_selector")
                                                                         .width(100.0)
                                                                         .selected_text(format!("{}", selected_val))
                                                                         .show_ui(ui, |ui| {
@@ -950,7 +1015,13 @@ impl EditorData {
                                                                                         .range(64..=4096),
                                                                                 );
                                                                             });
-                                                                        });
+                                                                        })
+                                                                        .response;
+
+                                                                    if response.hovered() {
+                                                                        hovered_help_title = Some("Timebase");
+                                                                        hovered_help_text = Some("Choose how much output history is shown in the rolling view.");
+                                                                    }
 
                                                                     if selected_val != current_val {
                                                                         current_timebase_ptr.store(selected_val, Ordering::Relaxed);
@@ -1005,16 +1076,21 @@ impl EditorData {
                                                                     .wrap_mode(egui::TextWrapMode::Extend)
                                                                     .min_size(ui.available_size());
 
-                                                                    if ui
+                                                                    let response = ui
                                                                         .with_layout(
                                                                             egui::Layout::centered_and_justified(
                                                                                 egui::Direction::LeftToRight,
                                                                             ),
                                                                             |ui| ui.add_sized(ui.available_size(), button),
                                                                         )
-                                                                        .inner
-                                                                        .clicked()
-                                                                    {
+                                                                        .inner;
+
+                                                                    if response.hovered() {
+                                                                        hovered_help_title = Some("Linear Ext.");
+                                                                        hovered_help_text = Some("Extend the curve linearly beyond the last point instead of clamping.");
+                                                                    }
+
+                                                                    if response.clicked() {
                                                                         println!("Linear Extension clicked");
                                                                         linear_ext_enabled_ptr.store(
                                                                             !linear_ext_enabled_ptr.load(Ordering::Relaxed),
@@ -1048,7 +1124,7 @@ impl EditorData {
                                                                         current_oversampling_factor_ptr.load(Ordering::Relaxed);
                                                                     let mut selected_factor = current_factor;
 
-                                                                    egui::ComboBox::from_id_salt("oversampling_selector")
+                                                                    let response = egui::ComboBox::from_id_salt("oversampling_selector")
                                                                         .width(100.0)
                                                                         .selected_text(format!("{}x", 1usize << selected_factor))
                                                                         .show_ui(ui, |ui| {
@@ -1056,7 +1132,13 @@ impl EditorData {
                                                                             ui.selectable_value(&mut selected_factor, 1, "2x");
                                                                             ui.selectable_value(&mut selected_factor, 2, "4x");
                                                                             ui.selectable_value(&mut selected_factor, 3, "8x");
-                                                                        });
+                                                                        })
+                                                                        .response;
+
+                                                                    if response.hovered() {
+                                                                        hovered_help_title = Some("Oversample");
+                                                                        hovered_help_text = Some("Raise the internal sample rate to reduce aliasing.");
+                                                                    }
 
                                                                     if selected_factor != current_factor {
                                                                         current_oversampling_factor_ptr
@@ -1091,16 +1173,21 @@ impl EditorData {
                                                                     )
                                                                     .min_size(ui.available_size());
 
-                                                                    if ui
+                                                                    let response = ui
                                                                         .with_layout(
                                                                             egui::Layout::centered_and_justified(
                                                                                 egui::Direction::LeftToRight,
                                                                             ),
                                                                             |ui| ui.add_sized(ui.available_size(), button),
                                                                         )
-                                                                        .inner
-                                                                        .clicked()
-                                                                    {
+                                                                        .inner;
+
+                                                                    if response.hovered() {
+                                                                        hovered_help_title = Some("Settings");
+                                                                        hovered_help_text = Some("Open interpolation and oversampling settings.");
+                                                                    }
+
+                                                                    if response.clicked() {
                                                                         open_settings_modal_ptr.store(true, Ordering::Relaxed);
                                                                     }
                                                                 },
@@ -1146,6 +1233,15 @@ impl EditorData {
                                         });
                                     });
                                 });
+
+                                if let Some(mut title) = help_panel_title_ptr.try_lock() {
+                                    title.clear();
+                                    title.push_str(hovered_help_title.unwrap_or(default_help_title));
+                                }
+                                if let Some(mut text) = help_panel_text_ptr.try_lock() {
+                                    text.clear();
+                                    text.push_str(hovered_help_text.unwrap_or(default_help_text));
+                                }
                             });
                         });
                     });
