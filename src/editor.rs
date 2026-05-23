@@ -550,7 +550,8 @@ impl EditorData {
                                             });
                                         });
 
-                                    egui::Frame::new().stroke(egui::Stroke::new(1.0, Color32::RED)).show(ui, |ui| {
+                                    // 它曾经是一个红色的边框……可惜边框已不再是少年，长得越发透明了
+                                    egui::Frame::new().stroke(egui::Stroke::new(1.0, Color32::TRANSPARENT)).show(ui, |ui| {
                                         ui.set_min_width(ui.available_width());
                                         ui.set_min_height(80.0);
 
@@ -650,8 +651,19 @@ impl EditorData {
                                                                 Color32::from_hex("#FFEAD0").unwrap()
                                                             };
 
+                                                            let button = egui::Button::new(
+                                                                RichText::new("󰉦 Colorful").color(text_color),
+                                                            )
+                                                            .min_size(ui.available_size());
+
                                                             if ui
-                                                                .add(egui::Button::new(RichText::new("󰉦 Colorful").color(text_color)))
+                                                                .with_layout(
+                                                                    egui::Layout::centered_and_justified(
+                                                                        egui::Direction::LeftToRight,
+                                                                    ),
+                                                                    |ui| ui.add_sized(ui.available_size(), button),
+                                                                )
+                                                                .inner
                                                                 .clicked()
                                                             {
                                                                 println!("󰉦 Colorful clicked");
@@ -753,15 +765,20 @@ impl EditorData {
                                                                         Color32::from_hex("#FFEAD0").unwrap()
                                                                     };
 
+                                                                    let button = egui::Button::new(
+                                                                        RichText::new("Linear Ext.").color(text_color),
+                                                                    )
+                                                                    .wrap_mode(egui::TextWrapMode::Extend)
+                                                                    .min_size(ui.available_size());
+
                                                                     if ui
-                                                                        .add(
-                                                                            egui::Button::new(
-                                                                                RichText::new("Linear Ext.")
-                                                                                    .color(text_color),
-                                                                            )
-                                                                            .wrap_mode(egui::TextWrapMode::Extend)
-                                                                            .min_size(Vec2::new(0.0, 0.0)),
+                                                                        .with_layout(
+                                                                            egui::Layout::centered_and_justified(
+                                                                                egui::Direction::LeftToRight,
+                                                                            ),
+                                                                            |ui| ui.add_sized(ui.available_size(), button),
                                                                         )
+                                                                        .inner
                                                                         .clicked()
                                                                     {
                                                                         println!("Linear Extension clicked");
@@ -832,14 +849,25 @@ impl EditorData {
                                                                     ui.set_height(ui.available_height());
 
                                                                     if ui
-                                                                        .add(
-                                                                            egui::Button::new(
-                                                                                RichText::new("About")
-                                                                                    .color(Color32::from_hex("#FFEAD0").unwrap()),
-                                                                            )
-                                                                            .wrap_mode(egui::TextWrapMode::Extend)
-                                                                            .min_size(Vec2::new(0.0, 0.0)),
+                                                                        .with_layout(
+                                                                            egui::Layout::centered_and_justified(
+                                                                                egui::Direction::LeftToRight,
+                                                                            ),
+                                                                            |ui| {
+                                                                                ui.add_sized(
+                                                                                    ui.available_size(),
+                                                                                    egui::Button::new(
+                                                                                        RichText::new(" About").color(
+                                                                                            Color32::from_hex("#FFEAD0")
+                                                                                                .unwrap(),
+                                                                                        ),
+                                                                                    )
+                                                                                    .wrap_mode(egui::TextWrapMode::Extend)
+                                                                                    .min_size(ui.available_size()),
+                                                                                )
+                                                                            },
                                                                         )
+                                                                        .inner
                                                                         .clicked()
                                                                     {
                                                                         open_about_modal_ptr.store(true, Ordering::Relaxed);
