@@ -407,7 +407,8 @@ pub fn rebuild_lut(curve: &LookupCurve, resolution: usize) -> Vec<f32> {
     let mut lut = Vec::with_capacity(resolution);
     for i in 0..resolution {
         let t = i as f32 / (resolution - 1) as f32;
-        lut.push(curve.lookup(t));
+        let value = curve.lookup(t);
+        lut.push(if value.is_finite() { value } else { 0.0 });
     }
     lut
 }

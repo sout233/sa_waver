@@ -453,10 +453,20 @@ impl EditorData {
                                                             if let Some(lut) = lut_cache.try_lock() {
                                                                 let curve_y =
                                                                     curve_lookup_with_linear_ext(&lut, current_t, linear_ext_enabled);
+                                                                if !curve_y.is_finite() {
+                                                                    display_output_y = None;
+                                                                    output_y = None;
+                                                                    return;
+                                                                }
                                                                 let visible_max_x = editor_ui.offset.x + editor_ui.scale.x;
                                                                 let visible_min_x = editor_ui.offset.x;
                                                                 let indicator_x = current_t.clamp(visible_min_x, visible_max_x);
                                                                 let indicator_pos = curve_to_screen(indicator_x, curve_y);
+                                                                if !indicator_pos.is_finite() {
+                                                                    display_output_y = None;
+                                                                    output_y = None;
+                                                                    return;
+                                                                }
 
                                                                 display_output_y = Some(indicator_pos.y);
 
@@ -961,6 +971,9 @@ fn rolling_oscilloscope(
                 let stroke_width = bar_width.max(1.0);
 
                 for (i, &sample_peak) in samples.iter().rev().enumerate() {
+                    if !sample_peak.is_finite() {
+                        continue;
+                    }
                     let x = rect.left() + (i as f32 * bar_width);
                     if x > rect.right() {
                         break;
@@ -1062,13 +1075,15 @@ fn curve_lookup_with_linear_ext(lut: &[f32], input: f32, linear_ext_enabled: boo
             let slope = last_val - prev_val;
             let excess = t - (lut_size - 1) as f32;
 
-            last_val + slope * excess
+            let value = last_val + slope * excess;
+            if value.is_finite() { value } else { last_val }
         } else {
             lut[lut_size - 1]
         }
     } else {
         let a = lut[index];
         let b = lut[index + 1];
-        a + fraction * (b - a)
+        let value = a + fraction * (b - a);
+        if value.is_finite() { value } else { a }
     }
 }
