@@ -6,6 +6,7 @@ use nih_plug_egui::egui::ColorImage;
 use nih_plug_egui::EguiState;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -44,6 +45,7 @@ pub struct WaverPlugin {
     pub current_oversampling_factor: Arc<AtomicUsize>,
     pub oversampling_times: Arc<AtomicF32>,
     pub oversamplers: Vec<Lanczos3Oversampler>,
+    pub reported_oversampling_factor: usize,
     // 降采样计数器
     pub sample_counter: usize,
     // 当前块的峰值累加器
@@ -82,8 +84,8 @@ struct WaverPluginParams {
     #[persist = "saved_plot_state"]
     pub saved_plot_state: Arc<Mutex<PlotStateSnapshot>>,
 
+    #[persist = "plot_dirty"]
     pub plot_dirty: Arc<AtomicBool>,
-
     pub oversampling_times: Arc<AtomicF32>,
 
     /// The parameter's ID is used to identify the parameter in the wrappred plugin API. As long as
@@ -143,7 +145,7 @@ impl Default for WaverPlugin {
                 curve_dirty: Arc::new(AtomicBool::new(true)),
                 editor: Arc::new(Mutex::new(LookupCurveEguiEditor::fitted_to_curve(&lookup_curve))),
                 lut_cache: Arc::new(Mutex::new(initial_lut)),
-                waveform_buffer: Arc::new(Mutex::new(vec![])),
+                waveform_buffer: Arc::new(Mutex::new(VecDeque::new())),
 
                 colored_waveform: params.colored_waveform.clone(),
                 presets: Arc::new(Mutex::new(Vec::new())),
@@ -166,6 +168,7 @@ impl Default for WaverPlugin {
                 DEFAULT_OVERSAMPLING_FACTOR,
             ) as f32)),
             oversamplers: Vec::new(),
+            reported_oversampling_factor: usize::MAX,
             sample_counter: 0,
             current_chunk_peak: 0.0,
             input_peak_follower: 0.0,
@@ -307,6 +310,7 @@ impl Plugin for WaverPlugin {
                 oversampler.latency(self.current_oversampling_factor.load(Ordering::Relaxed)),
             );
         }
+        self.reported_oversampling_factor = self.current_oversampling_factor.load(Ordering::Relaxed);
 
         true
     }
@@ -329,8 +333,11 @@ impl Plugin for WaverPlugin {
             .oversampling_times
             .store(oversampling_times as f32, Ordering::Relaxed);
 
+        if oversampling_factor != self.reported_oversampling_factor {
+            self.reported_oversampling_factor = oversampling_factor;
         if let Some(oversampler) = self.oversamplers.first() {
             context.set_latency_samples(oversampler.latency(oversampling_factor));
+        }
         }
 
         sync_lut_cache_from_state(
@@ -400,9 +407,9 @@ impl Plugin for WaverPlugin {
                             if self.sample_counter >= DOWNSAMPLE_RATE * oversampling_times {
                                 if let Some(mut waveform_buf) = self.editor_data.waveform_buffer.try_lock() {
                                     if waveform_buf.len() >= timebase {
-                                        waveform_buf.remove(0);
+                                        waveform_buf.pop_front();
                                     }
-                                    waveform_buf.push(self.current_chunk_peak);
+                                    waveform_buf.push_back(self.current_chunk_peak);
                                 }
 
                                 self.sample_counter = 0;

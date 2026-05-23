@@ -2,6 +2,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+use std::collections::VecDeque;
 
 use bevy_lookup_curve::{editor::LookupCurveEguiEditor, LookupCurve};
 use nih_plug::{
@@ -16,7 +17,7 @@ use nih_plug_egui::{
 use parking_lot::Mutex;
 
 use crate::{
-    capture_plot_state, fs, load_image_from_memory, plot_state_matches, sync_lut_cache_from_state,
+    capture_plot_state, fs, load_image_from_memory, sync_lut_cache_from_state,
     param_knob::ParamKnob,
     sout_ui::{self, SoutTheme},
     WaverPluginParams,
@@ -28,7 +29,7 @@ pub struct EditorData {
     pub editor: Arc<Mutex<LookupCurveEguiEditor>>,
     pub lut_cache: Arc<Mutex<Vec<f32>>>,
     // lut_size: usize,
-    pub waveform_buffer: Arc<Mutex<Vec<f32>>>,
+    pub waveform_buffer: Arc<Mutex<VecDeque<f32>>>,
 
     pub colored_waveform: Arc<AtomicBool>,
     pub presets: Arc<Mutex<Vec<String>>>,
@@ -40,6 +41,13 @@ pub struct EditorData {
     pub open_about_modal: Arc<AtomicBool>,
     pub msg_modal_title: Arc<Mutex<String>>,
     pub msg_modal_content: Arc<Mutex<String>>,
+}
+
+#[derive(Default)]
+struct EditorVisualCache {
+    fonts_loaded: bool,
+    background: Option<TextureHandle>,
+    save_icon: Option<TextureHandle>,
 }
 
 impl EditorData {
@@ -72,6 +80,7 @@ impl EditorData {
         let saving_preset_name_ptr = self.saving_preset_name.clone();
         let msg_modal_title_ptr = self.msg_modal_title.clone();
         let msg_modal_content_ptr = self.msg_modal_content.clone();
+        let visual_cache = Arc::new(Mutex::new(EditorVisualCache::default()));
 
         create_egui_editor(
             params.editor_state.clone(),
@@ -93,17 +102,36 @@ impl EditorData {
                     ctx.load_texture(name, image, Default::default())
                 };
 
-                let mut fonts = egui::FontDefinitions::default();
-                fonts.font_data.insert(
-                    "maple-mono".to_string(),
-                    std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/MapleMono-NF-CN-Regular.ttf"))),
-                );
-                fonts
-                    .families
-                    .get_mut(&egui::FontFamily::Proportional)
-                    .unwrap()
-                    .insert(0, "maple-mono".to_string());
-                ctx.set_fonts(fonts);
+                let (bg_texture, save_texture) = {
+                    let mut cache = visual_cache.lock();
+                    if !cache.fonts_loaded {
+                        let mut fonts = egui::FontDefinitions::default();
+                        fonts.font_data.insert(
+                            "maple-mono".to_string(),
+                            std::sync::Arc::new(egui::FontData::from_static(
+                                include_bytes!("../assets/MapleMono-NF-CN-Regular.ttf"),
+                            )),
+                        );
+                        fonts
+                            .families
+                            .get_mut(&egui::FontFamily::Proportional)
+                            .unwrap()
+                            .insert(0, "maple-mono".to_string());
+                        ctx.set_fonts(fonts);
+                        cache.fonts_loaded = true;
+                    }
+
+                    let bg_texture = cache
+                        .background
+                        .get_or_insert_with(|| load_image("background", include_bytes!("../assets/bg.png")))
+                        .clone();
+                    let save_texture = cache
+                        .save_icon
+                        .get_or_insert_with(|| load_image("save", include_bytes!("../assets/save.png")))
+                        .clone();
+
+                    (bg_texture, save_texture)
+                };
 
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(egui::Color32::BLACK).inner_margin(0.0))
@@ -114,8 +142,6 @@ impl EditorData {
                             &lut_cache,
                             current_resolution_ptr.load(Ordering::Relaxed),
                         );
-
-                        let bg_texture = load_image("background", include_bytes!("../assets/bg.png"));
 
                         let bg_img = egui::Shape::image(
                             bg_texture.id(),
@@ -148,7 +174,6 @@ impl EditorData {
 
                                             // ghost_button(ui, "".into());
 
-                                            let save_texture = load_image("save", include_bytes!("../assets/save.png"));
                                             let img_size = egui::vec2(12.0, 12.0);
                                             let img_src = egui::load::SizedTexture::new(save_texture.id(), img_size);
 
@@ -347,20 +372,9 @@ impl EditorData {
                                                     }
                                                 };
 
-                                                if let (Some(mut current_preset_guard), Some(curve_guard)) =
-                                                    (current_preset_ptr.try_lock(), lookup_curve.try_lock())
-                                                {
-                                                    let plot_dirty = !plot_state_matches(
-                                                        &params.saved_plot_state.lock(),
-                                                        &curve_guard,
-                                                        current_resolution_ptr.load(Ordering::Relaxed),
-                                                        current_timebase_ptr.load(Ordering::Relaxed),
-                                                        linear_ext_enabled_ptr.load(Ordering::Relaxed),
-                                                        current_oversampling_factor_ptr.load(Ordering::Relaxed),
-                                                        colored_waveform_ptr.load(Ordering::Relaxed),
-                                                    );
-                                                    plot_dirty_ptr.store(plot_dirty, Ordering::Relaxed);
+                                                if let Some(mut current_preset_guard) = current_preset_ptr.try_lock() {
                                                     let previous_preset = current_preset_guard.clone();
+                                                    let plot_dirty = plot_dirty_ptr.load(Ordering::Relaxed);
                                                     let preset_label = if plot_dirty {
                                                         format!("{} *", get_filename(&current_preset_guard))
                                                     } else {
@@ -489,6 +503,7 @@ impl EditorData {
 
                                                         if editor_ui.ui(ui, &mut curve, sample_for_editor) {
                                                             curve_dirty.store(true, Ordering::Relaxed);
+                                                            plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                         }
 
                                                         let curve_to_screen = |curve_x: f32, curve_y: f32| -> Pos2 {
@@ -667,6 +682,7 @@ impl EditorData {
                                                                 );
 
                                                                 curve_dirty.store(true, Ordering::Relaxed);
+                                                                plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                             }
                                                         },
                                                     );
@@ -724,6 +740,7 @@ impl EditorData {
                                                                     !colored_waveform_ptr.load(Ordering::Relaxed),
                                                                     Ordering::Relaxed,
                                                                 );
+                                                                plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                             }
                                                         },
                                                     );
@@ -774,6 +791,7 @@ impl EditorData {
 
                                                                     if selected_val != current_val {
                                                                         current_timebase_ptr.store(selected_val, Ordering::Relaxed);
+                                                                        plot_dirty_ptr.store(true, Ordering::Relaxed);
 
                                                                         println!(
                                                                             "Timebase changed to: {}",
@@ -839,6 +857,7 @@ impl EditorData {
                                                                             !linear_ext_enabled_ptr.load(Ordering::Relaxed),
                                                                             Ordering::Relaxed,
                                                                         );
+                                                                        plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                                     }
                                                                 },
                                                             );
@@ -879,6 +898,7 @@ impl EditorData {
                                                                     if selected_factor != current_factor {
                                                                         current_oversampling_factor_ptr
                                                                             .store(selected_factor, Ordering::Relaxed);
+                                                                        plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                                         println!("Oversampling changed to: {}x", 1usize << selected_factor);
                                                                     }
                                                                 },
@@ -978,7 +998,7 @@ impl EditorData {
 
 fn rolling_oscilloscope(
     ui: &mut egui::Ui,
-    waveform_buffer: Arc<Mutex<Vec<f32>>>,
+    waveform_buffer: Arc<Mutex<VecDeque<f32>>>,
     current_t_y: f32,
     top_y: f32,
     bottom_y: f32,
@@ -1080,7 +1100,7 @@ fn rolling_oscilloscope(
     });
 }
 
-fn waveform(ui: &mut egui::Ui, waveform_buffer: Arc<Mutex<Vec<f32>>>, timebase: usize) {
+fn waveform(ui: &mut egui::Ui, waveform_buffer: Arc<Mutex<VecDeque<f32>>>, timebase: usize) {
     ui.vertical(|ui| {
         ui.heading("Output Waveform");
 
