@@ -2094,11 +2094,19 @@ fn rolling_oscilloscope(
             egui::Color32::from_hex("#FFEAD0").unwrap().gamma_multiply_u8(2),
         );
 
+        let visual_value = |val: f32| -> f32 {
+            if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                val
+            } else {
+                val.abs()
+            }
+        };
+
         let map_y = |val: f32| -> f32 {
             let t = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
-                (val + 1.0) * 0.5
+                (visual_value(val) + 1.0) * 0.5
             } else {
-                val
+                visual_value(val)
             };
             egui::lerp(bottom_y..=top_y, t)
         };
