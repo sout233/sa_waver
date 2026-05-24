@@ -81,6 +81,7 @@ pub struct EditorData {
 struct EditorVisualCache {
     background: Option<TextureHandle>,
     save_icon: Option<TextureHandle>,
+    und3ath_logo: Option<TextureHandle>,
 }
 
 impl EditorData {
@@ -169,6 +170,10 @@ impl EditorData {
 
                 state.background = Some(load_image("background", include_bytes!("../assets/bg.png")));
                 state.save_icon = Some(load_image("save", include_bytes!("../assets/save.png")));
+                state.und3ath_logo = Some(load_image(
+                    "und3ath_logo",
+                    include_bytes!("../presets/Producers/UnD3ath/producer_logo.png"),
+                ));
             },
             move |ctx, setter, state| {
                 let theme = SoutTheme::new();
@@ -181,6 +186,10 @@ impl EditorData {
                     .save_icon
                     .clone()
                     .unwrap_or_else(|| ctx.load_texture("save_fallback", ColorImage::example(), Default::default()));
+                let und3ath_logo = state
+                    .und3ath_logo
+                    .clone()
+                    .unwrap_or_else(|| ctx.load_texture("und3ath_logo_fallback", ColorImage::example(), Default::default()));
 
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(egui::Color32::BLACK).inner_margin(0.0))
@@ -1081,6 +1090,7 @@ impl EditorData {
                                                                             &producer_presets,
                                                                             &producers_root,
                                                                             preset_menu_height,
+                                                                            Some(&und3ath_logo),
                                                                         );
                                                                     });
                                                                 }
@@ -2274,9 +2284,10 @@ fn show_preset_tree(
     preset_paths: &[String],
     root: &std::path::Path,
     menu_height: f32,
+    und3ath_logo: Option<&TextureHandle>,
 ) {
     ui.set_max_height(menu_height);
-    show_preset_tree_level(ui, current_preset, preset_paths, root, 0, menu_height);
+    show_preset_tree_level(ui, current_preset, preset_paths, root, 0, menu_height, und3ath_logo);
 }
 
 fn show_preset_tree_level(
@@ -2286,6 +2297,7 @@ fn show_preset_tree_level(
     root: &std::path::Path,
     depth: usize,
     menu_height: f32,
+    und3ath_logo: Option<&TextureHandle>,
 ) {
     let mut grouped: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
     let mut direct_files = Vec::new();
@@ -2305,6 +2317,27 @@ fn show_preset_tree_level(
         }
     }
 
+    if depth == 1
+        && root
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq("Producers"))
+        && grouped.contains_key("UnD3ath")
+    {
+        if let Some(logo) = und3ath_logo {
+            let logo_size = egui::vec2(180.0, 64.0);
+            let logo_texture = egui::load::SizedTexture::new(logo.id(), logo_size);
+            let logo_response = ui.add(
+                egui::Button::image(logo_texture)
+                    .frame(false)
+                    .min_size(logo_size),
+            );
+            if logo_response.clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab("https://space.bilibili.com/224632474"));
+            }
+            ui.separator();
+        }
+    }
+
     for preset in direct_files {
         if ui
             .selectable_value(current_preset, preset.clone(), preset_display_name(&preset))
@@ -2315,9 +2348,54 @@ fn show_preset_tree_level(
     }
 
     for (folder, presets) in grouped {
-        ui.menu_button(folder, |ui| {
+        let is_und3ath_folder = depth == 0 && folder == "UnD3ath";
+        ui.menu_button(&folder, |ui| {
             ui.set_max_height(menu_height);
-            show_preset_tree_level(ui, current_preset, &presets, root, depth + 1, menu_height);
+            if is_und3ath_folder {
+                if let Some(logo) = und3ath_logo {
+                    let source_size = egui::load::SizedTexture::from_handle(logo).size;
+                    let target_height = 44.0_f32;
+                    let aspect_ratio = if source_size.y > 0.0 {
+                        source_size.x / source_size.y
+                    } else {
+                        1.0
+                    };
+                    let logo_size = egui::vec2(target_height * aspect_ratio, target_height);
+                    let logo_texture = egui::load::SizedTexture::new(logo.id(), logo_size);
+                    let card_width = ui.available_width().max(logo_size.x + 96.0);
+                    let card_height = logo_size.y.max(36.0);
+                    let card_response = ui
+                        .allocate_ui(egui::vec2(card_width, card_height), |ui| {
+                            let rect = ui.max_rect();
+                            let response = ui.interact(
+                                rect,
+                                ui.make_persistent_id("und3ath_producer_card"),
+                                egui::Sense::click(),
+                            );
+
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::Image::from_texture(logo_texture)
+                                        .fit_to_exact_size(logo_size),
+                                );
+                                ui.add_space(6.0);
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("UnD3ath").size(14.0).strong());
+                                    ui.label(RichText::new("VIP Presets").size(11.0).weak());
+                                });
+                            });
+
+                            response
+                        })
+                        .inner;
+
+                    if card_response.clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab("https://space.bilibili.com/224632474"));
+                    }
+                    ui.separator();
+                }
+            }
+            show_preset_tree_level(ui, current_preset, &presets, root, depth + 1, menu_height, und3ath_logo);
         });
     }
 }
