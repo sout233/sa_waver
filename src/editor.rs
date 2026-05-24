@@ -1025,43 +1025,83 @@ impl EditorData {
                                                 ui.style_mut().spacing.interact_size.y = 20.0;
                                                 ui.style_mut().spacing.button_padding = egui::vec2(10.0, 4.0);
 
-                                                let get_filename = |path_str: &str| {
-                                                    let path = std::path::Path::new(path_str);
-                                                    match path.file_stem() {
-                                                        Some(stem) => stem.to_string_lossy().to_string(),
-                                                        None => "".to_string(),
-                                                    }
-                                                };
-
                                                 if let Some(mut current_preset_guard) = current_preset_ptr.try_lock() {
                                                     let previous_preset = current_preset_guard.clone();
                                                     let plot_dirty = plot_dirty_ptr.load(Ordering::Relaxed);
                                                     let preset_label = if plot_dirty {
-                                                        format!("{} *", get_filename(&current_preset_guard))
+                                                        format!("{} *", preset_display_name(&current_preset_guard))
                                                     } else {
-                                                        get_filename(&current_preset_guard)
+                                                        preset_display_name(&current_preset_guard)
                                                     };
 
-                                                    let response = egui::ComboBox::from_id_salt("preset_selector")
-                                                        .selected_text(preset_label)
-                                                        .show_ui(ui, |ui| {
-                                                            ui.selectable_value(
-                                                                &mut *current_preset_guard,
-                                                                "./Default.ron".to_string(),
-                                                                "Default",
-                                                            );
+                                                    let preset_menu_height = (ui.ctx().screen_rect().height() * 0.85).max(480.0_f32);
+                                                    let button_min_width = ui.spacing().combo_width;
+                                                    let preset_button = egui::Button::new(
+                                                        RichText::new(format!("{preset_label}  ▾")).color(Color32::from_hex("#FFEAD0").unwrap()),
+                                                    )
+                                                    .min_size(egui::vec2(button_min_width, ui.spacing().interact_size.y));
+                                                    let response = egui::menu::menu_custom_button(ui, preset_button, |ui| {
+                                                        ui.set_min_width(button_min_width);
+                                                        egui::ScrollArea::vertical()
+                                                            .max_height(preset_menu_height)
+                                                            .show(ui, |ui| {
+                                                                ui.set_min_width(button_min_width);
 
-                                                            if let Some(presets) = presets_ptr.try_lock() {
-                                                                for preset in presets.iter() {
-                                                                    ui.selectable_value(
+                                                                if ui
+                                                                    .selectable_value(
                                                                         &mut *current_preset_guard,
-                                                                        preset.to_string(),
-                                                                        get_filename(preset),
-                                                                    );
+                                                                        "./Default.ron".to_string(),
+                                                                        "Default",
+                                                                    )
+                                                                    .clicked()
+                                                                {
+                                                                    ui.close_menu();
                                                                 }
-                                                            }
-                                                        })
-                                                        .response;
+
+                                                                let builtin_presets = fs::get_builtin_presets();
+                                                                let producers_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                                                                    .join("presets")
+                                                                    .join("Producers");
+                                                                let producer_presets: Vec<String> = builtin_presets
+                                                                    .into_iter()
+                                                                    .filter(|preset| {
+                                                                        std::path::Path::new(preset).starts_with(&producers_root)
+                                                                    })
+                                                                    .collect();
+                                                                if !producer_presets.is_empty() {
+                                                                    ui.separator();
+                                                                    ui.menu_button("Producers", |ui| {
+                                                                        ui.set_max_height(preset_menu_height);
+                                                                        show_preset_tree(
+                                                                            ui,
+                                                                            &mut *current_preset_guard,
+                                                                            &producer_presets,
+                                                                            &producers_root,
+                                                                            preset_menu_height,
+                                                                        );
+                                                                    });
+                                                                }
+
+                                                                if let Some(presets) = presets_ptr.try_lock() {
+                                                                    if !presets.is_empty() {
+                                                                        ui.separator();
+                                                                        for preset in presets.iter() {
+                                                                            if ui
+                                                                                .selectable_value(
+                                                                                    &mut *current_preset_guard,
+                                                                                    preset.to_string(),
+                                                                                    preset_display_name(preset),
+                                                                                )
+                                                                                .clicked()
+                                                                            {
+                                                                                ui.close_menu();
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            });
+                                                    })
+                                                    .response;
 
                                                     if response.hovered() {
                                                         hovered_help_title = Some("Preset");
@@ -2207,6 +2247,80 @@ fn parse_trailing_version(name: &str) -> Option<(String, usize)> {
     let (base, version_str) = trimmed.rsplit_once(" v")?;
     let version = version_str.parse().ok()?;
     Some((base.to_string(), version))
+}
+
+fn preset_display_name(path_str: &str) -> String {
+    std::path::Path::new(path_str)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+fn relative_preset_segments(path_str: &str, root: &std::path::Path) -> Vec<String> {
+    std::path::Path::new(path_str)
+        .strip_prefix(root)
+        .ok()
+        .map(|relative| {
+            relative
+                .iter()
+                .map(|part| part.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn show_preset_tree(
+    ui: &mut egui::Ui,
+    current_preset: &mut String,
+    preset_paths: &[String],
+    root: &std::path::Path,
+    menu_height: f32,
+) {
+    ui.set_max_height(menu_height);
+    show_preset_tree_level(ui, current_preset, preset_paths, root, 0, menu_height);
+}
+
+fn show_preset_tree_level(
+    ui: &mut egui::Ui,
+    current_preset: &mut String,
+    preset_paths: &[String],
+    root: &std::path::Path,
+    depth: usize,
+    menu_height: f32,
+) {
+    let mut grouped: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    let mut direct_files = Vec::new();
+
+    for preset in preset_paths {
+        let segments = relative_preset_segments(preset, root);
+        if segments.len() <= depth {
+            continue;
+        }
+        if segments.len() == depth + 1 {
+            direct_files.push(preset.clone());
+        } else {
+            grouped
+                .entry(segments[depth].clone())
+                .or_default()
+                .push(preset.clone());
+        }
+    }
+
+    for preset in direct_files {
+        if ui
+            .selectable_value(current_preset, preset.clone(), preset_display_name(&preset))
+            .clicked()
+        {
+            ui.close_menu();
+        }
+    }
+
+    for (folder, presets) in grouped {
+        ui.menu_button(folder, |ui| {
+            ui.set_max_height(menu_height);
+            show_preset_tree_level(ui, current_preset, &presets, root, depth + 1, menu_height);
+        });
+    }
 }
 
 fn generate_segment_shape(

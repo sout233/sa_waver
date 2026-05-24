@@ -1,3 +1,20 @@
+fn collect_ron_files_recursive(dir: &std::path::Path, presets: &mut Vec<String>) -> std::io::Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_ron_files_recursive(&path, presets)?;
+        } else if path.is_file() && path.extension() == Some("ron".as_ref()) {
+            presets.push(path.to_string_lossy().to_string());
+        }
+    }
+
+    Ok(())
+}
+
 pub fn get_presets() -> Option<Vec<String>> {
     let config_dir = directories::BaseDirs::new()?
         .config_dir()
@@ -9,21 +26,19 @@ pub fn get_presets() -> Option<Vec<String>> {
         return Some(vec![]);
     }
 
-    let entries = std::fs::read_dir(&config_dir).ok()?;
-
-    let presets = entries
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if path.is_file() && path.extension() == Some("ron".as_ref()) {
-                // path.file_name()?.to_str().map(|s| s.to_string())
-                Some(path.to_string_lossy().to_string())
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut presets = Vec::new();
+    collect_ron_files_recursive(&config_dir, &mut presets).ok()?;
+    presets.sort();
 
     Some(presets)
+}
+
+pub fn get_builtin_presets() -> Vec<String> {
+    let presets_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("presets");
+    let mut presets = Vec::new();
+    let _ = collect_ron_files_recursive(&presets_dir, &mut presets);
+    presets.sort();
+    presets
 }
 
 
