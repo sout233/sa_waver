@@ -1,4 +1,5 @@
 use bevy_lookup_curve::{editor::LookupCurveEguiEditor, LookupCurve};
+use bevy_math::Vec2;
 use fundsp::prelude::*;
 use nih_plug::params::persist::PersistentField;
 use nih_plug::prelude::*;
@@ -26,19 +27,22 @@ pub const INTERPOLATION_MODE_LINEAR: usize = 0;
 pub const INTERPOLATION_MODE_COSINE: usize = 1;
 pub const INTERPOLATION_MODE_HERMITE: usize = 2;
 pub const DEFAULT_INTERPOLATION_MODE: usize = INTERPOLATION_MODE_LINEAR;
+pub const SYMMETRY_MODE_SYMMETRIC: usize = 0;
+pub const SYMMETRY_MODE_ASYMMETRIC: usize = 1;
+pub const DEFAULT_SYMMETRY_MODE: usize = SYMMETRY_MODE_SYMMETRIC;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PlotStateSnapshot {
     pub curve: LookupCurve,
-    pub resolution: usize,
-    pub timebase: usize,
-    pub linear_ext: bool,
-    pub oversampling_factor: usize,
-    pub colored_waveform: bool,
-    #[serde(default = "default_interpolation_mode")]
-    pub interpolation_mode: usize,
-    #[serde(default = "default_oversampling_algorithm")]
-    pub oversampling_algorithm: usize,
+    #[serde(default = "default_symmetry_mode")]
+    pub symmetry_mode: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PresetFile {
+    pub curve: LookupCurve,
+    #[serde(default = "default_symmetry_mode")]
+    pub symmetry_mode: usize,
 }
 
 pub struct WaverPlugin {
@@ -46,7 +50,7 @@ pub struct WaverPlugin {
     editor_data: EditorData,
 
     pub linear_ext: Arc<AtomicBool>,
-    pub is_bipolar: Arc<AtomicBool>,
+    pub symmetry_mode: Arc<AtomicUsize>,
 
     pub current_resolution: Arc<AtomicUsize>,
     pub current_timebase: Arc<AtomicUsize>,
@@ -82,6 +86,9 @@ struct WaverPluginParams {
 
     #[persist = "linear_ext"]
     pub linear_ext: Arc<AtomicBool>,
+
+    #[persist = "symmetry_mode"]
+    pub symmetry_mode: Arc<AtomicUsize>,
 
     #[persist = "oversampling_factor"]
     pub current_oversampling_factor: Arc<AtomicUsize>,
@@ -145,13 +152,7 @@ impl Default for WaverPlugin {
         *params.current_preset.lock() = String::from("./Default.ron");
         *params.saved_plot_state.lock() = capture_plot_state(
             &lookup_curve,
-            1024,
-            512,
-            false,
-            DEFAULT_OVERSAMPLING_FACTOR,
-            false,
-            DEFAULT_INTERPOLATION_MODE,
-            DEFAULT_OVERSAMPLING_ALGORITHM,
+            DEFAULT_SYMMETRY_MODE,
         );
         params.plot_dirty.store(false, Ordering::Relaxed);
 
@@ -184,7 +185,7 @@ impl Default for WaverPlugin {
             current_resolution: params.current_resolution.clone(),
             current_timebase: params.current_timebase.clone(),
             linear_ext: params.linear_ext.clone(),
-            is_bipolar: Arc::new(AtomicBool::new(false)),
+            symmetry_mode: params.symmetry_mode.clone(),
             current_oversampling_factor: params.current_oversampling_factor.clone(),
             current_interpolation_mode: params.current_interpolation_mode.clone(),
             current_oversampling_algorithm: params.current_oversampling_algorithm.clone(),
@@ -214,6 +215,7 @@ impl Default for WaverPluginParams {
             current_resolution: Arc::new(AtomicUsize::new(1024)),
             current_timebase: Arc::new(AtomicUsize::new(512)),
             linear_ext: Arc::new(AtomicBool::new(false)),
+            symmetry_mode: Arc::new(AtomicUsize::new(DEFAULT_SYMMETRY_MODE)),
             current_oversampling_factor: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_FACTOR)),
             colored_waveform: Arc::new(AtomicBool::new(false)),
             current_interpolation_mode: Arc::new(AtomicUsize::new(DEFAULT_INTERPOLATION_MODE)),
@@ -221,13 +223,7 @@ impl Default for WaverPluginParams {
             current_preset: Arc::new(Mutex::new(String::from("./Default.ron"))),
             saved_plot_state: Arc::new(Mutex::new(PlotStateSnapshot {
                 curve: lookup_curve.clone(),
-                resolution: 1024,
-                timebase: 512,
-                linear_ext: false,
-                oversampling_factor: DEFAULT_OVERSAMPLING_FACTOR,
-                colored_waveform: false,
-                interpolation_mode: DEFAULT_INTERPOLATION_MODE,
-                oversampling_algorithm: DEFAULT_OVERSAMPLING_ALGORITHM,
+                symmetry_mode: DEFAULT_SYMMETRY_MODE,
             })),
             plot_dirty: Arc::new(AtomicBool::new(false)),
             oversampling_times: oversampling_times.clone(),
@@ -351,8 +347,10 @@ impl Plugin for WaverPlugin {
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, context: &mut impl ProcessContext<Self>) -> ProcessStatus {
         let mut block_max_abs = 0.0f32;
+        let mut block_max_signed = 0.0f32;
         const DOWNSAMPLE_RATE: usize = 256;
         let linear_ext_enabled = self.linear_ext.load(Ordering::Relaxed);
+        let symmetry_mode = self.symmetry_mode.load(Ordering::Relaxed);
         let timebase = self.current_timebase.load(Ordering::Relaxed);
         let oversampling_factor = self.current_oversampling_factor.load(Ordering::Relaxed);
         let interpolation_mode = self.current_interpolation_mode.load(Ordering::Relaxed);
@@ -386,11 +384,10 @@ impl Plugin for WaverPlugin {
             &self.editor_data.curve_dirty,
             &self.editor_data.lut_cache,
             resolution,
+            symmetry_mode,
         );
 
         if let Some(lut) = self.editor_data.lut_cache.try_lock() {
-            let lut_size = lut.len();
-
             for (_, block) in buffer.iter_blocks(buffer.samples()) {
                 for (channel_samples, oversampler) in block.into_iter().zip(self.oversamplers.iter_mut()) {
                     oversampler.process(channel_samples, oversampling_factor, |upsampled| {
@@ -402,44 +399,28 @@ impl Plugin for WaverPlugin {
                             let dry_signal = *sample;
                             let input = dry_signal * pre_gain;
 
-                            let raw_abs_input = input.abs();
-                            let abs_input = if linear_ext_enabled {
-                                raw_abs_input
-                            } else {
-                                raw_abs_input.min(1.0)
-                            };
-
-                            if abs_input > block_max_abs {
-                                block_max_abs = abs_input;
+                            if input.abs() > block_max_abs {
+                                block_max_abs = input.abs();
+                                block_max_signed = input;
                             }
 
-                            let sign = input.signum();
-                            let t = abs_input * (lut_size - 1) as f32;
-                            let index = t.floor() as usize;
-                            let fraction = t - index as f32;
-
-                            let curve_val = if index >= lut_size - 1 {
-                                if linear_ext_enabled {
-                                    let last_val = lut[lut_size - 1];
-                                    let prev_val = lut[lut_size - 2];
-                                    let slope = last_val - prev_val;
-                                    let excess = t - (lut_size - 1) as f32;
-
-                                    last_val + slope * excess
-                                } else {
-                                    lut[lut_size - 1]
-                                }
-                            } else {
-                                sample_lut(lut.as_slice(), index, fraction, interpolation_mode)
-                            };
-
-                            let shaped = curve_val * sign;
+                            let shaped = curve_lookup(
+                                &lut,
+                                input,
+                                linear_ext_enabled,
+                                interpolation_mode,
+                                symmetry_mode,
+                            );
                             let wet_signal = shaped * post_gain;
                             *sample = dry_signal * (1.0 - mix) + wet_signal * mix;
 
-                            let out_abs = shaped.abs();
-                            if out_abs > self.current_chunk_peak {
-                                self.current_chunk_peak = out_abs;
+                            let stored_peak = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                                shaped
+                            } else {
+                                shaped.abs()
+                            };
+                            if stored_peak.abs() > self.current_chunk_peak.abs() {
+                                self.current_chunk_peak = stored_peak;
                             }
 
                             self.sample_counter += 1;
@@ -460,13 +441,8 @@ impl Plugin for WaverPlugin {
             }
         }
 
-        if block_max_abs > self.input_peak_follower {
-            self.input_peak_follower = block_max_abs;
-        } else {
-            self.input_peak_follower *= 0.95;
-        }
-
-        self.latest_input.store(self.input_peak_follower, Ordering::Relaxed);
+        self.latest_input
+            .store(block_max_signed.clamp(-1.5, 1.5), Ordering::Relaxed);
 
         ProcessStatus::Normal
     }
@@ -478,6 +454,7 @@ impl Plugin for WaverPlugin {
             self.current_resolution.clone(),
             self.current_timebase.clone(),
             self.linear_ext.clone(),
+            self.symmetry_mode.clone(),
             self.current_oversampling_factor.clone(),
             self.current_interpolation_mode.clone(),
             self.current_oversampling_algorithm.clone(),
@@ -497,10 +474,18 @@ impl WaverPlugin {
 }
 
 pub fn rebuild_lut(curve: &LookupCurve, resolution: usize) -> Vec<f32> {
+    rebuild_lut_for_mode(curve, resolution, DEFAULT_SYMMETRY_MODE)
+}
+
+pub fn rebuild_lut_for_mode(curve: &LookupCurve, resolution: usize, symmetry_mode: usize) -> Vec<f32> {
     let resolution = std::cmp::max(resolution, 2);
     let mut lut = Vec::with_capacity(resolution);
     for i in 0..resolution {
-        let t = i as f32 / (resolution - 1) as f32;
+        let t = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+            (i as f32 / (resolution - 1) as f32) * 2.0 - 1.0
+        } else {
+            i as f32 / (resolution - 1) as f32
+        };
         let value = curve.lookup(t);
         lut.push(if value.is_finite() { value } else { 0.0 });
     }
@@ -509,44 +494,20 @@ pub fn rebuild_lut(curve: &LookupCurve, resolution: usize) -> Vec<f32> {
 
 pub fn capture_plot_state(
     curve: &LookupCurve,
-    resolution: usize,
-    timebase: usize,
-    linear_ext: bool,
-    oversampling_factor: usize,
-    colored_waveform: bool,
-    interpolation_mode: usize,
-    oversampling_algorithm: usize,
+    symmetry_mode: usize,
 ) -> PlotStateSnapshot {
     PlotStateSnapshot {
         curve: curve.clone(),
-        resolution,
-        timebase,
-        linear_ext,
-        oversampling_factor,
-        colored_waveform,
-        interpolation_mode,
-        oversampling_algorithm,
+        symmetry_mode,
     }
 }
 
 pub fn plot_state_matches(
     snapshot: &PlotStateSnapshot,
     curve: &LookupCurve,
-    resolution: usize,
-    timebase: usize,
-    linear_ext: bool,
-    oversampling_factor: usize,
-    colored_waveform: bool,
-    interpolation_mode: usize,
-    oversampling_algorithm: usize,
+    symmetry_mode: usize,
 ) -> bool {
-    snapshot.resolution == resolution
-        && snapshot.timebase == timebase
-        && snapshot.linear_ext == linear_ext
-        && snapshot.oversampling_factor == oversampling_factor
-        && snapshot.colored_waveform == colored_waveform
-        && snapshot.interpolation_mode == interpolation_mode
-        && snapshot.oversampling_algorithm == oversampling_algorithm
+    snapshot.symmetry_mode == symmetry_mode
         && curves_match(&snapshot.curve, curve)
 }
 
@@ -585,6 +546,7 @@ pub fn sync_lut_cache_from_state(
     dirty_flag: &AtomicBool,
     lut_cache: &Mutex<Vec<f32>>,
     resolution: usize,
+    symmetry_mode: usize,
 ) {
     let resolution = std::cmp::max(resolution, 2);
     let needs_sync = dirty_flag.swap(false, Ordering::Relaxed)
@@ -595,7 +557,7 @@ pub fn sync_lut_cache_from_state(
     }
 
     if let (Some(curve), Some(mut lut)) = (curve_state.try_lock(), lut_cache.try_lock()) {
-        *lut = rebuild_lut(&curve, resolution);
+        *lut = rebuild_lut_for_mode(&curve, resolution, symmetry_mode);
     } else {
         dirty_flag.store(true, Ordering::Relaxed);
     }
@@ -657,12 +619,131 @@ pub fn sample_lut(lut: &[f32], index: usize, fraction: f32, interpolation_mode: 
     }
 }
 
+pub fn curve_lookup(
+    lut: &[f32],
+    input: f32,
+    linear_ext_enabled: bool,
+    interpolation_mode: usize,
+    symmetry_mode: usize,
+) -> f32 {
+    if lut.is_empty() {
+        return 0.0;
+    }
+
+    if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+        let sample_input = if linear_ext_enabled {
+            input
+        } else {
+            input.clamp(-1.0, 1.0)
+        };
+
+        let t = ((sample_input + 1.0) * 0.5) * (lut.len() - 1) as f32;
+        let clamped_t = t.clamp(0.0, (lut.len() - 1) as f32);
+        let index = clamped_t.floor() as usize;
+        let fraction = clamped_t - index as f32;
+
+        if t >= (lut.len() - 1) as f32 {
+            if linear_ext_enabled && lut.len() >= 2 {
+                let last_val = lut[lut.len() - 1];
+                let prev_val = lut[lut.len() - 2];
+                let step = last_val - prev_val;
+                let excess = t - (lut.len() - 1) as f32;
+                let linear = last_val + step * excess;
+                if linear.is_finite() { linear } else { last_val }
+            } else {
+                lut[lut.len() - 1]
+            }
+        } else if t <= 0.0 {
+            if linear_ext_enabled && lut.len() >= 2 {
+                let first_val = lut[0];
+                let next_val = lut[1];
+                let step = next_val - first_val;
+                let excess = t;
+                let linear = first_val + step * excess;
+                if linear.is_finite() { linear } else { first_val }
+            } else {
+                lut[0]
+            }
+        } else {
+            sample_lut(lut, index, fraction, interpolation_mode)
+        }
+    } else {
+        let raw_abs_input = input.abs();
+        let abs_input = if linear_ext_enabled {
+            raw_abs_input
+        } else {
+            raw_abs_input.min(1.0)
+        };
+
+        let t = abs_input * (lut.len() - 1) as f32;
+        let index = t.floor() as usize;
+        let fraction = t - index as f32;
+
+        let curve_val = if index >= lut.len() - 1 {
+            if linear_ext_enabled && lut.len() >= 2 {
+                let last_val = lut[lut.len() - 1];
+                let prev_val = lut[lut.len() - 2];
+                let slope = last_val - prev_val;
+                let excess = t - (lut.len() - 1) as f32;
+                let linear = last_val + slope * excess;
+                if linear.is_finite() { linear } else { last_val }
+            } else {
+                lut[lut.len() - 1]
+            }
+        } else {
+            sample_lut(lut, index, fraction, interpolation_mode)
+        };
+
+        curve_val * input.signum()
+    }
+}
+
+pub fn transform_curve_for_symmetry_mode(curve: &LookupCurve, target_mode: usize) -> LookupCurve {
+    match target_mode {
+        SYMMETRY_MODE_ASYMMETRIC => make_curve_asymmetric(curve),
+        _ => make_curve_symmetric(curve),
+    }
+}
+
+pub fn save_preset_file(path: &str, snapshot: &PlotStateSnapshot) -> Result<(), Box<dyn Error>> {
+    let preset = PresetFile {
+        curve: snapshot.curve.clone(),
+        symmetry_mode: snapshot.symmetry_mode,
+    };
+
+    let config = ron::ser::PrettyConfig::new()
+        .new_line("\n".to_string())
+        .indentor("  ".to_string());
+    let serialized = ron::ser::to_string_pretty(&preset, config)?;
+    std::fs::write(path, serialized)?;
+    Ok(())
+}
+
+pub fn load_preset_file(bytes: &[u8]) -> Result<PlotStateSnapshot, Box<dyn Error>> {
+    if let Ok(preset) = ron::de::from_bytes::<PresetFile>(bytes) {
+        return Ok(PlotStateSnapshot {
+            curve: preset.curve,
+            symmetry_mode: preset.symmetry_mode,
+        });
+    }
+
+    let curve = LookupCurve::load_from_bytes(bytes)?;
+    Ok(PlotStateSnapshot {
+        curve,
+        symmetry_mode: default_symmetry_mode(),
+    })
+}
+
 const fn default_interpolation_mode() -> usize {
     DEFAULT_INTERPOLATION_MODE
 }
 
 const fn default_oversampling_algorithm() -> usize {
     DEFAULT_OVERSAMPLING_ALGORITHM
+}
+
+const fn default_symmetry_mode() -> usize {
+    DEFAULT_SYMMETRY_MODE
 }
 
 impl ClapPlugin for WaverPlugin {
@@ -685,4 +766,74 @@ nih_export_clap!(WaverPlugin);
 
 const fn oversampling_factor_to_times(factor: usize) -> usize {
     2usize.pow(factor as u32)
+}
+
+fn make_curve_asymmetric(curve: &LookupCurve) -> LookupCurve {
+    let positive_knots: Vec<_> = curve
+        .knots()
+        .iter()
+        .copied()
+        .filter(|knot| knot.position.x >= 0.0)
+        .collect();
+
+    if positive_knots.is_empty() {
+        return LookupCurve::new(vec![
+            bevy_lookup_curve::Knot {
+                position: Vec2::new(-1.0, -1.0),
+                ..Default::default()
+            },
+            bevy_lookup_curve::Knot {
+                position: Vec2::new(0.0, 0.0),
+                ..Default::default()
+            },
+            bevy_lookup_curve::Knot {
+                position: Vec2::new(1.0, 1.0),
+                ..Default::default()
+            },
+        ]);
+    }
+
+    let mut mirrored = Vec::with_capacity(positive_knots.len().saturating_sub(1));
+    for idx in (1..positive_knots.len()).rev() {
+        let mut mirrored_knot = mirror_knot_around_origin(positive_knots[idx]);
+        mirrored_knot.interpolation = positive_knots[idx - 1].interpolation;
+        mirrored.push(mirrored_knot);
+    }
+
+    let mut knots = mirrored;
+    knots.extend(positive_knots);
+    LookupCurve::new(knots)
+}
+
+fn make_curve_symmetric(curve: &LookupCurve) -> LookupCurve {
+    let mut positive_knots: Vec<_> = curve
+        .knots()
+        .iter()
+        .copied()
+        .filter(|knot| knot.position.x >= 0.0)
+        .collect();
+
+    if positive_knots.is_empty() {
+        positive_knots.push(bevy_lookup_curve::Knot {
+            position: Vec2::new(0.0, 0.0),
+            ..Default::default()
+        });
+        positive_knots.push(bevy_lookup_curve::Knot {
+            position: Vec2::new(1.0, 1.0),
+            ..Default::default()
+        });
+    }
+
+    LookupCurve::new(positive_knots)
+}
+
+fn mirror_knot_around_origin(knot: bevy_lookup_curve::Knot) -> bevy_lookup_curve::Knot {
+    let mut mirrored = bevy_lookup_curve::Knot {
+        interpolation: knot.interpolation,
+        left_tangent: knot.right_tangent,
+        right_tangent: knot.left_tangent,
+        ..Default::default()
+    };
+    mirrored.position = Vec2::new(-knot.position.x, -knot.position.y);
+    mirrored
 }

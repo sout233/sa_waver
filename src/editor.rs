@@ -17,11 +17,13 @@ use nih_plug_egui::{
 use parking_lot::Mutex;
 
 use crate::{
-    capture_plot_state, fs, load_image_from_memory, sample_lut, sync_lut_cache_from_state,
+    capture_plot_state, curve_lookup, fs, load_image_from_memory, load_preset_file, save_preset_file,
+    sync_lut_cache_from_state, transform_curve_for_symmetry_mode,
     oversampling::{OVERSAMPLING_ALGORITHM_FLAT_FIR, OVERSAMPLING_ALGORITHM_LANCZOS3},
     param_knob::ParamKnob,
     sout_ui::{self, SoutTheme},
-    WaverPluginParams, INTERPOLATION_MODE_COSINE, INTERPOLATION_MODE_HERMITE, INTERPOLATION_MODE_LINEAR,
+    DEFAULT_SYMMETRY_MODE, WaverPluginParams, INTERPOLATION_MODE_COSINE, INTERPOLATION_MODE_HERMITE,
+    INTERPOLATION_MODE_LINEAR, SYMMETRY_MODE_ASYMMETRIC, SYMMETRY_MODE_SYMMETRIC,
 };
 
 pub struct EditorData {
@@ -62,6 +64,7 @@ impl EditorData {
         current_resolution: Arc<AtomicUsize>,
         current_timebase: Arc<AtomicUsize>,
         linear_ext: Arc<AtomicBool>,
+        symmetry_mode: Arc<AtomicUsize>,
         current_oversampling_factor: Arc<AtomicUsize>,
         current_interpolation_mode: Arc<AtomicUsize>,
         current_oversampling_algorithm: Arc<AtomicUsize>,
@@ -79,6 +82,7 @@ impl EditorData {
         let current_resolution_ptr = current_resolution.clone();
         let current_timebase_ptr = current_timebase.clone();
         let linear_ext_enabled_ptr = linear_ext.clone();
+        let symmetry_mode_ptr = symmetry_mode.clone();
         let current_oversampling_factor_ptr = current_oversampling_factor.clone();
         let current_interpolation_mode_ptr = current_interpolation_mode.clone();
         let current_oversampling_algorithm_ptr = current_oversampling_algorithm.clone();
@@ -165,6 +169,7 @@ impl EditorData {
                             &curve_dirty,
                             &lut_cache,
                             current_resolution_ptr.load(Ordering::Relaxed),
+                            symmetry_mode_ptr.load(Ordering::Relaxed),
                         );
 
                         let bg_img = egui::Shape::image(
@@ -287,7 +292,12 @@ impl EditorData {
                                                                     match fs::build_preset_path(&name_guard) {
                                                                         Ok(path) => {
                                                                             if let Some(curve) = lookup_curve.try_lock() {
-                                                                                if let Err(err) = curve.save_to_file(&path) {
+                                                                                let snapshot = capture_plot_state(
+                                                                                    &curve,
+                                                                                    symmetry_mode_ptr.load(Ordering::Relaxed),
+                                                                                );
+
+                                                                                if let Err(err) = save_preset_file(&path, &snapshot) {
                                                                                     show_msg_modal(
                                                                                         "Error",
                                                                                         format!(
@@ -301,18 +311,7 @@ impl EditorData {
                                                                                         format!("Saved preset to: {}", path),
                                                                                     );
                                                                                     *current_preset_ptr.lock() = path.clone();
-                                                                                    *params.saved_plot_state.lock() = capture_plot_state(
-                                                                                        &curve,
-                                                                                        current_resolution_ptr.load(Ordering::Relaxed),
-                                                                                        current_timebase_ptr.load(Ordering::Relaxed),
-                                                                                        linear_ext_enabled_ptr.load(Ordering::Relaxed),
-                                                                                        current_oversampling_factor_ptr.load(Ordering::Relaxed),
-                                                                                        colored_waveform_ptr.load(Ordering::Relaxed),
-                                                                                        current_interpolation_mode_ptr
-                                                                                            .load(Ordering::Relaxed),
-                                                                                        current_oversampling_algorithm_ptr
-                                                                                            .load(Ordering::Relaxed),
-                                                                                    );
+                                                                                    *params.saved_plot_state.lock() = snapshot;
                                                                                     plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                                     let presets = fs::get_presets().unwrap_or_default();
                                                                                     *presets_ptr.lock() = presets;
@@ -421,6 +420,46 @@ impl EditorData {
                                                     ui.set_width(340.0);
                                                     ui.heading("Settings");
                                                     ui.add_space(8.0);
+                                                    ui.label("Timebase");
+                                                    ui.add_space(6.0);
+
+                                                    ui.scope(|ui| {
+                                                        let visuals = ui.visuals_mut();
+                                                        sout_ui::make_combobox_visuals(
+                                                            visuals,
+                                                            Color32::from_hex("#554e4a").unwrap(),
+                                                        );
+                                                        ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                        let current_val = current_timebase_ptr.load(Ordering::Relaxed);
+                                                        let mut selected_val = current_val;
+
+                                                        egui::ComboBox::from_id_salt("settings_timebase_selector")
+                                                            .width(220.0)
+                                                            .selected_text(format!("{}", current_val))
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(&mut selected_val, 128, "128");
+                                                                ui.selectable_value(&mut selected_val, 256, "256");
+                                                                ui.selectable_value(&mut selected_val, 512, "512");
+                                                                ui.selectable_value(&mut selected_val, 1024, "1024");
+
+                                                                ui.separator();
+                                                                ui.horizontal(|ui| {
+                                                                    ui.label("Custom:");
+                                                                    ui.add(
+                                                                        egui::DragValue::new(&mut selected_val)
+                                                                            .clamp_existing_to_range(true)
+                                                                            .range(64..=4096),
+                                                                    );
+                                                                });
+                                                            });
+
+                                                        if selected_val != current_val {
+                                                            current_timebase_ptr.store(selected_val, Ordering::Relaxed);
+                                                        }
+                                                    });
+
+                                                    ui.add_space(12.0);
                                                     ui.label("Interpolation");
                                                     ui.add_space(6.0);
 
@@ -460,7 +499,6 @@ impl EditorData {
                                                         if selected_mode != current_mode {
                                                             current_interpolation_mode_ptr
                                                                 .store(selected_mode, Ordering::Relaxed);
-                                                            plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                         }
                                                     });
 
@@ -499,7 +537,6 @@ impl EditorData {
                                                         if selected_algo != current_algo {
                                                             current_oversampling_algorithm_ptr
                                                                 .store(selected_algo, Ordering::Relaxed);
-                                                            plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                         }
                                                     });
 
@@ -579,41 +616,36 @@ impl EditorData {
                                                         let preset_data =
                                                             std::fs::read(format!("{}", *current_preset_guard)).unwrap_or_default();
                                                         if let Some(mut curve) = lookup_curve.try_lock() {
-                                                            match LookupCurve::load_from_bytes(&preset_data) {
-                                                                Ok(c) => {
-                                                                    *curve = c;
-                                                                    curve_dirty.store(true, Ordering::Relaxed);
-                                                                    *params.saved_plot_state.lock() = capture_plot_state(
-                                                                        &curve,
-                                                                        current_resolution_ptr.load(Ordering::Relaxed),
-                                                                        current_timebase_ptr.load(Ordering::Relaxed),
-                                                                        linear_ext_enabled_ptr.load(Ordering::Relaxed),
-                                                                        current_oversampling_factor_ptr.load(Ordering::Relaxed),
-                                                                        colored_waveform_ptr.load(Ordering::Relaxed),
-                                                                        current_interpolation_mode_ptr
-                                                                            .load(Ordering::Relaxed),
-                                                                        current_oversampling_algorithm_ptr
-                                                                            .load(Ordering::Relaxed),
+                                                            match load_preset_file(&preset_data) {
+                                                                Ok(snapshot) => {
+                                                                    *curve = snapshot.curve.clone();
+                                                                    symmetry_mode_ptr.store(
+                                                                        snapshot.symmetry_mode,
+                                                                        Ordering::Relaxed,
                                                                     );
+                                                                    curve_dirty.store(true, Ordering::Relaxed);
+                                                                    *params.saved_plot_state.lock() = snapshot;
+                                                                    if let Some(mut editor_ui) = editor.try_lock() {
+                                                                        editor_ui.fit_to_curve(&curve);
+                                                                    }
                                                                     plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                 }
                                                                 Err(e) => {
                                                                     println!("Failed to load preset: {}", e);
                                                                     *curve = LookupCurve::load_from_bytes(include_bytes!("default.ron"))
                                                                         .unwrap();
+                                                                    symmetry_mode_ptr.store(
+                                                                        DEFAULT_SYMMETRY_MODE,
+                                                                        Ordering::Relaxed,
+                                                                    );
                                                                     curve_dirty.store(true, Ordering::Relaxed);
                                                                     *params.saved_plot_state.lock() = capture_plot_state(
                                                                         &curve,
-                                                                        current_resolution_ptr.load(Ordering::Relaxed),
-                                                                        current_timebase_ptr.load(Ordering::Relaxed),
-                                                                        linear_ext_enabled_ptr.load(Ordering::Relaxed),
-                                                                        current_oversampling_factor_ptr.load(Ordering::Relaxed),
-                                                                        colored_waveform_ptr.load(Ordering::Relaxed),
-                                                                        current_interpolation_mode_ptr
-                                                                            .load(Ordering::Relaxed),
-                                                                        current_oversampling_algorithm_ptr
-                                                                            .load(Ordering::Relaxed),
+                                                                        DEFAULT_SYMMETRY_MODE,
                                                                     );
+                                                                    if let Some(mut editor_ui) = editor.try_lock() {
+                                                                        editor_ui.fit_to_curve(&curve);
+                                                                    }
                                                                     plot_dirty_ptr.store(false, Ordering::Relaxed);
                                                                 }
                                                             }
@@ -640,26 +672,40 @@ impl EditorData {
                             // ui.add(widgets::ParamSlider::for_param(&params.pre_gain, setter));
 
                             let current_t = latest_input_ptr.load(Ordering::Relaxed);
-                            let mut output_y = None;
-                            let mut display_output_y = None;
+                            let mut preview_output_value = None;
+                            let mut preview_output_screen_y = None;
                             let mut top_y = 0.0;
                             let mut bottom_y = 0.0;
 
                             let colored_waveform = colored_waveform_ptr.load(Ordering::Relaxed);
                             let current_timebase = current_timebase_ptr.load(Ordering::Relaxed);
                             let linear_ext_enabled = linear_ext_enabled_ptr.load(Ordering::Relaxed);
+                            let current_symmetry_mode = symmetry_mode_ptr.load(Ordering::Relaxed);
 
                             egui::Frame::new().inner_margin(12.0).show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     if let (Some(mut curve), Some(mut editor_ui)) = (lookup_curve.try_lock(), editor.try_lock()) {
                                         let side_length = ui.available_height().max(350.0);
                                         let square_size = egui::Vec2::splat(side_length);
-                                        let should_draw_manual_indicator = linear_ext_enabled && current_t > 1.0;
+                                        let editor_domain_min = if current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                                            -1.0
+                                        } else {
+                                            0.0
+                                        };
+                                        let editor_domain_max = 1.0;
+                                        let display_input = if current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                                            current_t
+                                        } else {
+                                            current_t.abs()
+                                        };
+                                        let should_draw_manual_indicator =
+                                            linear_ext_enabled && display_input.abs() > editor_domain_max;
                                         let sample_for_editor = if should_draw_manual_indicator {
                                             None
                                         } else {
-                                            Some(current_t)
+                                            Some(display_input.clamp(editor_domain_min, editor_domain_max))
                                         };
+                                        editor_ui.bipolar = current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC;
 
                                         // curve editor
                                         egui::Frame::new()
@@ -696,34 +742,48 @@ impl EditorData {
                                                         };
 
                                                         top_y = curve_to_screen(1.0, 1.0).y;
-                                                        bottom_y = curve_to_screen(0.0, 0.0).y;
+                                                        bottom_y = if current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                                                            curve_to_screen(-1.0, -1.0).y
+                                                        } else {
+                                                            curve_to_screen(0.0, 0.0).y
+                                                        };
 
                                                         if should_draw_manual_indicator {
                                                             if let Some(lut) = lut_cache.try_lock() {
-                                                                let curve_y =
-                                                                    curve_lookup_with_linear_ext(
-                                                                        &lut,
-                                                                        current_t,
-                                                                        linear_ext_enabled,
-                                                                        current_interpolation_mode_ptr
-                                                                            .load(Ordering::Relaxed),
-                                                                    );
-                                                                if !curve_y.is_finite() {
-                                                                    display_output_y = None;
-                                                                    output_y = None;
+                                                                let actual_curve_y = curve_lookup(
+                                                                    &lut,
+                                                                    current_t,
+                                                                    linear_ext_enabled,
+                                                                    current_interpolation_mode_ptr
+                                                                        .load(Ordering::Relaxed),
+                                                                    current_symmetry_mode,
+                                                                );
+                                                                let display_curve_y = if current_symmetry_mode
+                                                                    == SYMMETRY_MODE_ASYMMETRIC
+                                                                {
+                                                                    actual_curve_y
+                                                                } else {
+                                                                    actual_curve_y.abs()
+                                                                };
+                                                                if !display_curve_y.is_finite() {
+                                                                    preview_output_screen_y = None;
+                                                                    preview_output_value = None;
                                                                     return;
                                                                 }
                                                                 let visible_max_x = editor_ui.offset.x + editor_ui.scale.x;
                                                                 let visible_min_x = editor_ui.offset.x;
-                                                                let indicator_x = current_t.clamp(visible_min_x, visible_max_x);
-                                                                let indicator_pos = curve_to_screen(indicator_x, curve_y);
+                                                                let indicator_x =
+                                                                    display_input.clamp(visible_min_x, visible_max_x);
+                                                                let indicator_pos =
+                                                                    curve_to_screen(indicator_x, display_curve_y);
                                                                 if !indicator_pos.is_finite() {
-                                                                    display_output_y = None;
-                                                                    output_y = None;
+                                                                    preview_output_screen_y = None;
+                                                                    preview_output_value = None;
                                                                     return;
                                                                 }
 
-                                                                display_output_y = Some(indicator_pos.y);
+                                                                preview_output_screen_y = Some(indicator_pos.y);
+                                                                preview_output_value = Some(display_curve_y);
 
                                                                 ui.painter().line_segment(
                                                                     [
@@ -736,8 +796,9 @@ impl EditorData {
                                                                 ui.painter()
                                                                     .circle_filled(indicator_pos, 3.0, Color32::LIGHT_GREEN);
 
-                                                                if current_t > visible_max_x {
-                                                                    let arrow_tip = egui::pos2(curve_rect.right() - 2.0, indicator_pos.y);
+                                                                if display_input > visible_max_x {
+                                                                    let arrow_tip =
+                                                                        egui::pos2(curve_rect.right() - 2.0, indicator_pos.y);
                                                                     let arrow_back_top =
                                                                         egui::pos2(curve_rect.right() - 10.0, indicator_pos.y - 5.0);
                                                                     let arrow_back_bottom =
@@ -748,19 +809,45 @@ impl EditorData {
                                                                         Color32::LIGHT_GREEN,
                                                                         egui::Stroke::NONE,
                                                                     ));
+                                                                } else if display_input < visible_min_x {
+                                                                    let arrow_tip =
+                                                                        egui::pos2(curve_rect.left() + 2.0, indicator_pos.y);
+                                                                    let arrow_back_top =
+                                                                        egui::pos2(curve_rect.left() + 10.0, indicator_pos.y - 5.0);
+                                                                    let arrow_back_bottom =
+                                                                        egui::pos2(curve_rect.left() + 10.0, indicator_pos.y + 5.0);
+
+                                                                    ui.painter().add(egui::Shape::convex_polygon(
+                                                                        vec![arrow_tip, arrow_back_top, arrow_back_bottom],
+                                                                        Color32::LIGHT_GREEN,
+                                                                        egui::Stroke::NONE,
+                                                                    ));
                                                                 }
                                                             }
                                                         } else {
-                                                            output_y = editor_ui.sample_point;
-                                                            display_output_y = editor_ui.sample_point.map(|point| point.y);
+                                                            preview_output_screen_y = editor_ui.sample_point.map(|point| point.y);
+                                                            if let Some(lut) = lut_cache.try_lock() {
+                                                                let actual_curve_y = curve_lookup(
+                                                                    &lut,
+                                                                    current_t,
+                                                                    linear_ext_enabled,
+                                                                    current_interpolation_mode_ptr
+                                                                        .load(Ordering::Relaxed),
+                                                                    current_symmetry_mode,
+                                                                );
+                                                                preview_output_value = Some(
+                                                                    if current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                                                                        actual_curve_y
+                                                                    } else {
+                                                                        actual_curve_y.abs()
+                                                                    },
+                                                                );
+                                                            }
                                                         }
                                                     });
                                                 });
                                             });
                                     }
-
-                                    // waveform(ui, waveform_buffer.clone());
-                                    let current_t = display_output_y.unwrap_or_else(|| output_y.map(|point| point.y).unwrap_or(0.0));
 
                                     // oscilloscope
                                     egui::Frame::new()
@@ -780,11 +867,12 @@ impl EditorData {
                                             rolling_oscilloscope(
                                                 ui,
                                                 waveform_buffer.clone(),
-                                                current_t,
+                                                preview_output_value.unwrap_or(0.0),
                                                 top_y,
                                                 bottom_y,
                                                 colored_waveform,
                                                 current_timebase,
+                                                current_symmetry_mode,
                                             );
                                         });
                                 });
@@ -893,7 +981,7 @@ impl EditorData {
 
                                                             if response.hovered() {
                                                                 hovered_help_title = Some("Resolution");
-                                                                hovered_help_text = Some("Set LUT size for the curve. Higher values reduce lookup error.");
+                                                                hovered_help_text = Some("Set LUT size for the curve. Higher values reduce lookup noises.");
                                                             }
 
                                                             if selected_val != current_val {
@@ -905,7 +993,6 @@ impl EditorData {
                                                                 );
 
                                                                 curve_dirty.store(true, Ordering::Relaxed);
-                                                                plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                             }
                                                         },
                                                     );
@@ -968,7 +1055,6 @@ impl EditorData {
                                                                     !colored_waveform_ptr.load(Ordering::Relaxed),
                                                                     Ordering::Relaxed,
                                                                 );
-                                                                plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                             }
                                                         },
                                                     );
@@ -980,7 +1066,7 @@ impl EditorData {
                                             ui.vertical(|ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.vertical(|ui| {
-                                                        ui.label(RichText::new("󰄉 Timebase").size(12.0));
+                                                        ui.label(RichText::new(" Symmetry").size(12.0));
 
                                                         ui.scope(|ui| {
                                                             let visuals = ui.visuals_mut();
@@ -994,43 +1080,42 @@ impl EditorData {
                                                                     ui.set_width(ui.available_width());
                                                                     ui.set_height(ui.available_height());
 
-                                                                    let current_val = current_timebase_ptr.load(Ordering::Relaxed);
+                                                                    let current_val = symmetry_mode_ptr.load(Ordering::Relaxed);
                                                                     let mut selected_val = current_val;
 
-                                                                    let response = egui::ComboBox::from_id_salt("timebase_selector")
+                                                                    let response = egui::ComboBox::from_id_salt("symmetry_selector")
                                                                         .width(100.0)
-                                                                        .selected_text(format!("{}", selected_val))
+                                                                        .selected_text(symmetry_mode_label(selected_val))
                                                                         .show_ui(ui, |ui| {
-                                                                            ui.selectable_value(&mut selected_val, 128, "128");
-                                                                            ui.selectable_value(&mut selected_val, 256, "256");
-                                                                            ui.selectable_value(&mut selected_val, 512, "512");
-                                                                            ui.selectable_value(&mut selected_val, 1024, "1024");
-
-                                                                            ui.separator();
-                                                                            ui.horizontal(|ui| {
-                                                                                ui.label("Custom:");
-                                                                                ui.add(
-                                                                                    egui::DragValue::new(&mut selected_val)
-                                                                                        .clamp_existing_to_range(true)
-                                                                                        .range(64..=4096),
-                                                                                );
-                                                                            });
+                                                                            ui.selectable_value(
+                                                                                &mut selected_val,
+                                                                                SYMMETRY_MODE_SYMMETRIC,
+                                                                                "Symmetric",
+                                                                            );
+                                                                            ui.selectable_value(
+                                                                                &mut selected_val,
+                                                                                SYMMETRY_MODE_ASYMMETRIC,
+                                                                                "Asymmetric",
+                                                                            );
                                                                         })
                                                                         .response;
 
                                                                     if response.hovered() {
-                                                                        hovered_help_title = Some("Timebase");
-                                                                        hovered_help_text = Some("Choose how much output history is shown in the rolling view.");
+                                                                        hovered_help_title = Some("Symmetry");
+                                                                        hovered_help_text = Some("Switch between mirrored shaping and independent negative shaping.");
                                                                     }
 
                                                                     if selected_val != current_val {
-                                                                        current_timebase_ptr.store(selected_val, Ordering::Relaxed);
+                                                                        if let Some(mut curve) = lookup_curve.try_lock() {
+                                                                            *curve =
+                                                                                transform_curve_for_symmetry_mode(&curve, selected_val);
+                                                                            if let Some(mut editor_ui) = editor.try_lock() {
+                                                                                editor_ui.fit_to_curve(&curve);
+                                                                            }
+                                                                            curve_dirty.store(true, Ordering::Relaxed);
+                                                                        }
+                                                                        symmetry_mode_ptr.store(selected_val, Ordering::Relaxed);
                                                                         plot_dirty_ptr.store(true, Ordering::Relaxed);
-
-                                                                        println!(
-                                                                            "Timebase changed to: {}",
-                                                                            current_timebase_ptr.load(Ordering::Relaxed)
-                                                                        );
                                                                     }
                                                                 },
                                                             );
@@ -1096,7 +1181,6 @@ impl EditorData {
                                                                             !linear_ext_enabled_ptr.load(Ordering::Relaxed),
                                                                             Ordering::Relaxed,
                                                                         );
-                                                                        plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                                     }
                                                                 },
                                                             );
@@ -1143,7 +1227,6 @@ impl EditorData {
                                                                     if selected_factor != current_factor {
                                                                         current_oversampling_factor_ptr
                                                                             .store(selected_factor, Ordering::Relaxed);
-                                                                        plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                                         println!("Oversampling changed to: {}x", 1usize << selected_factor);
                                                                     }
                                                                 },
@@ -1184,7 +1267,7 @@ impl EditorData {
 
                                                                     if response.hovered() {
                                                                         hovered_help_title = Some("Settings");
-                                                                        hovered_help_text = Some("Open interpolation and oversampling settings.");
+                                                                        hovered_help_text = Some("Open holy settings. u know.");
                                                                     }
 
                                                                     if response.clicked() {
@@ -1253,11 +1336,12 @@ impl EditorData {
 fn rolling_oscilloscope(
     ui: &mut egui::Ui,
     waveform_buffer: Arc<Mutex<VecDeque<f32>>>,
-    current_t_y: f32,
+    current_value: f32,
     top_y: f32,
     bottom_y: f32,
     colored_waveform: bool,
     timebase: usize,
+    symmetry_mode: usize,
 ) {
     ui.vertical(|ui| {
         // ui.label("Output");
@@ -1290,7 +1374,11 @@ fn rolling_oscilloscope(
         );
 
         let map_y = |val: f32| -> f32 {
-            let t = val.clamp(0.0, 114.0);
+            let t = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                ((val.clamp(-1.0, 1.0) + 1.0) * 0.5).clamp(0.0, 1.0)
+            } else {
+                val.clamp(0.0, 1.0)
+            };
             egui::lerp(bottom_y..=top_y, t)
         };
 
@@ -1299,8 +1387,8 @@ fn rolling_oscilloscope(
                 let bar_width = rect.width() / timebase as f32;
                 let stroke_width = bar_width.max(1.0);
 
-                for (i, &sample_peak) in samples.iter().rev().enumerate() {
-                    if !sample_peak.is_finite() {
+                for (i, &sample_value) in samples.iter().rev().enumerate() {
+                    if !sample_value.is_finite() {
                         continue;
                     }
                     let x = rect.left() + (i as f32 * bar_width);
@@ -1308,18 +1396,27 @@ fn rolling_oscilloscope(
                         break;
                     }
 
-                    let y_top = map_y(sample_peak).min(rect.bottom()).max(rect.top());
-                    let y_bottom = bottom_y.min(rect.bottom()).max(rect.top());
+                    let base_y = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                        map_y(0.0)
+                    } else {
+                        bottom_y
+                    }
+                    .min(rect.bottom())
+                    .max(rect.top());
+                    let sample_y = map_y(sample_value).min(rect.bottom()).max(rect.top());
+                    let y_top = sample_y.min(base_y);
+                    let y_bottom = sample_y.max(base_y);
 
                     let base_color = egui::Color32::from_hex("#FFEAD0").unwrap();
                     let min_opacity = 0.24;
-                    let opacity = min_opacity + (sample_peak * (1.0 - min_opacity));
+                    let intensity = sample_value.abs().clamp(0.0, 1.0);
+                    let opacity = min_opacity + (intensity * (1.0 - min_opacity));
 
                     let color = if colored_waveform {
-                        if sample_peak > 0.95 {
+                        if intensity > 0.95 {
                             egui::Color32::from_rgb(255, 50, 50)
                         } else {
-                            egui::Color32::from_rgb((sample_peak * 255.0) as u8, (255.0 - sample_peak * 100.0) as u8, 0)
+                            egui::Color32::from_rgb((intensity * 255.0) as u8, (255.0 - intensity * 100.0) as u8, 0)
                         }
                     } else {
                         base_color.gamma_multiply(opacity.clamp(0.0, 1.0))
@@ -1340,7 +1437,7 @@ fn rolling_oscilloscope(
             }
         };
 
-        draw_horizontal_line(current_t_y, egui::Stroke::new(1.2, egui::Color32::from_rgb(255, 215, 0)));
+        draw_horizontal_line(map_y(current_value), egui::Stroke::new(1.2, egui::Color32::from_rgb(255, 215, 0)));
 
         draw_horizontal_line(
             top_y,
@@ -1381,44 +1478,6 @@ fn waveform(ui: &mut egui::Ui, waveform_buffer: Arc<Mutex<VecDeque<f32>>>, timeb
     });
 }
 
-fn curve_lookup_with_linear_ext(
-    lut: &[f32],
-    input: f32,
-    linear_ext_enabled: bool,
-    interpolation_mode: usize,
-) -> f32 {
-    if lut.is_empty() {
-        return 0.0;
-    }
-
-    let lut_size = lut.len();
-    let abs_input = if linear_ext_enabled {
-        input.abs()
-    } else {
-        input.abs().min(1.0)
-    };
-
-    let t = abs_input * (lut_size - 1) as f32;
-    let index = t.floor() as usize;
-    let fraction = t - index as f32;
-
-    if index >= lut_size - 1 {
-        if linear_ext_enabled && lut_size >= 2 {
-            let last_val = lut[lut_size - 1];
-            let prev_val = lut[lut_size - 2];
-            let slope = last_val - prev_val;
-            let excess = t - (lut_size - 1) as f32;
-
-            let value = last_val + slope * excess;
-            if value.is_finite() { value } else { last_val }
-        } else {
-            lut[lut_size - 1]
-        }
-    } else {
-        sample_lut(lut, index, fraction, interpolation_mode)
-    }
-}
-
 fn interpolation_mode_label(mode: usize) -> &'static str {
     match mode {
         INTERPOLATION_MODE_LINEAR => "Linear",
@@ -1433,6 +1492,13 @@ fn oversampling_algorithm_label(mode: usize) -> &'static str {
         OVERSAMPLING_ALGORITHM_LANCZOS3 => "Lanczos3",
         OVERSAMPLING_ALGORITHM_FLAT_FIR => "Flat FIR",
         _ => "Lanczos3",
+    }
+}
+
+fn symmetry_mode_label(mode: usize) -> &'static str {
+    match mode {
+        SYMMETRY_MODE_ASYMMETRIC => "Asymmetric",
+        _ => "Symmetric",
     }
 }
 
