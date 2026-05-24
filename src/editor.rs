@@ -30,6 +30,25 @@ use crate::{
     DISPLAY_MODE_DBFS, DISPLAY_MODE_LINEAR, DISPLAY_SCOPE_XY, DISPLAY_SCOPE_Y_ONLY,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SegmentGeneratorKind {
+    Sine,
+    Triangle,
+    Square,
+    Stairs,
+}
+
+impl SegmentGeneratorKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sine => "Sine Wave",
+            Self::Triangle => "Triangle",
+            Self::Square => "Square",
+            Self::Stairs => "Stairs",
+        }
+    }
+}
+
 pub struct EditorData {
     pub lookup_curve: Arc<Mutex<LookupCurve>>,
     pub curve_dirty: Arc<AtomicBool>,
@@ -48,6 +67,10 @@ pub struct EditorData {
     pub open_about_modal: Arc<AtomicBool>,
     pub open_settings_modal: Arc<AtomicBool>,
     pub settings_tab: Arc<AtomicUsize>,
+    pub segment_generator_kind: Arc<AtomicUsize>,
+    pub segment_generator_cycles: Arc<AtomicUsize>,
+    pub segment_generator_steps: Arc<AtomicUsize>,
+    pub segment_generator_active: Arc<AtomicBool>,
     pub help_panel_title: Arc<Mutex<String>>,
     pub help_panel_text: Arc<Mutex<String>>,
     pub msg_modal_title: Arc<Mutex<String>>,
@@ -106,6 +129,10 @@ impl EditorData {
         let open_about_modal_ptr = self.open_about_modal.clone();
         let open_settings_modal_ptr = self.open_settings_modal.clone();
         let settings_tab_ptr = self.settings_tab.clone();
+        let segment_generator_kind_ptr = self.segment_generator_kind.clone();
+        let segment_generator_cycles_ptr = self.segment_generator_cycles.clone();
+        let segment_generator_steps_ptr = self.segment_generator_steps.clone();
+        let segment_generator_active_ptr = self.segment_generator_active.clone();
         let help_panel_title_ptr = self.help_panel_title.clone();
         let help_panel_text_ptr = self.help_panel_text.clone();
         let saving_preset_name_ptr = self.saving_preset_name.clone();
@@ -1107,6 +1134,21 @@ impl EditorData {
                             let mut preview_output_screen_y = None;
                             let mut top_y = 0.0;
                             let mut bottom_y = 0.0;
+                            let mut plot_has_focus = false;
+                            let mut selected_knot_count = 0usize;
+                            let mut selected_knot_ids_for_generator: Vec<usize> = Vec::new();
+                            let mut selected_generator = match segment_generator_kind_ptr.load(Ordering::Relaxed) {
+                                1 => SegmentGeneratorKind::Triangle,
+                                2 => SegmentGeneratorKind::Square,
+                                3 => SegmentGeneratorKind::Stairs,
+                                _ => SegmentGeneratorKind::Sine,
+                            };
+                            let mut generator_cycles =
+                                segment_generator_cycles_ptr.load(Ordering::Relaxed).clamp(1, 32);
+                            let mut generator_steps =
+                                segment_generator_steps_ptr.load(Ordering::Relaxed).clamp(2, 64);
+                            let previous_generator_active =
+                                segment_generator_active_ptr.load(Ordering::Relaxed);
 
                             let colored_waveform = colored_waveform_ptr.load(Ordering::Relaxed);
                             let current_timebase = current_timebase_ptr.load(Ordering::Relaxed);
@@ -1185,6 +1227,10 @@ impl EditorData {
                                                             curve_dirty.store(true, Ordering::Relaxed);
                                                             plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                         }
+                                                        plot_has_focus = editor_ui.has_focus;
+                                                        selected_knot_count = editor_ui.selected_knot_ids.len();
+                                                        selected_knot_ids_for_generator =
+                                                            editor_ui.selected_knot_ids.iter().copied().collect();
 
                                                         let curve_to_screen =
                                                             |curve_x: f32, curve_y: f32| -> Pos2 {
@@ -1332,6 +1378,14 @@ impl EditorData {
                                 ui.add_space(8.0);
 
                                 ui.horizontal(|ui| {
+                                    let generator_should_show = if plot_has_focus {
+                                        true
+                                    } else {
+                                        previous_generator_active && selected_knot_count > 0
+                                    };
+                                    segment_generator_active_ptr
+                                        .store(generator_should_show, Ordering::Relaxed);
+
                                     egui::Frame::new()
                                         .fill(Color32::from_hex("#373230").unwrap())
                                         .corner_radius(8.0)
@@ -1352,31 +1406,197 @@ impl EditorData {
                                                         |ui| {
                                                             ui.set_width(ui.available_width());
                                                             ui.style_mut().spacing.item_spacing.y = 2.0;
+                                                            if generator_should_show {
+                                                                // ui.label(
+                                                                //     RichText::new("Segment Generator")
+                                                                //         .size(15.0)
+                                                                //         .color(Color32::from_hex("#FFEAD0").unwrap()),
+                                                                // );
+                                                                // ui.add_space(4.0);
 
-                                                            let help_title_size = if current_help_title == default_help_title {
-                                                                20.0
-                                                            } else {
-                                                                14.0
-                                                            };
+                                                                if selected_knot_count == 2 {
+                                                                    ui.horizontal(|ui| {
+                                                                        ui.scope(|ui| {
+                                                                            let visuals = ui.visuals_mut();
+                                                                            sout_ui::make_combobox_visuals(
+                                                                                visuals,
+                                                                                Color32::from_hex("#34302e").unwrap(),
+                                                                            );
+                                                                            ui.style_mut().spacing.interact_size.y = 24.0;
 
-                                                            ui.label(
-                                                                RichText::new(current_help_title.as_str())
-                                                                    .size(help_title_size)
-                                                                    .color(Color32::from_hex("#FFEAD0").unwrap()),
-                                                            );
-                                                            ui.add_space(1.0);
-                                                            ui.add(
-                                                                egui::Label::new(
-                                                                    RichText::new(current_help_text.as_str())
-                                                                        .size(13.0)
+                                                                            egui::ComboBox::from_id_salt(
+                                                                                "segment_generator_selector",
+                                                                            )
+                                                                            .width(180.0)
+                                                                            .selected_text(selected_generator.label())
+                                                                            .show_ui(ui, |ui| {
+                                                                                ui.selectable_value(
+                                                                                    &mut selected_generator,
+                                                                                    SegmentGeneratorKind::Sine,
+                                                                                    SegmentGeneratorKind::Sine.label(),
+                                                                                );
+                                                                                ui.selectable_value(
+                                                                                    &mut selected_generator,
+                                                                                    SegmentGeneratorKind::Triangle,
+                                                                                    SegmentGeneratorKind::Triangle.label(),
+                                                                                );
+                                                                                ui.selectable_value(
+                                                                                    &mut selected_generator,
+                                                                                    SegmentGeneratorKind::Square,
+                                                                                    SegmentGeneratorKind::Square.label(),
+                                                                                );
+                                                                                ui.selectable_value(
+                                                                                    &mut selected_generator,
+                                                                                    SegmentGeneratorKind::Stairs,
+                                                                                    SegmentGeneratorKind::Stairs.label(),
+                                                                                );
+                                                                            });
+                                                                        });
+
+                                                                        segment_generator_kind_ptr.store(
+                                                                            match selected_generator {
+                                                                                SegmentGeneratorKind::Sine => 0,
+                                                                                SegmentGeneratorKind::Triangle => 1,
+                                                                                SegmentGeneratorKind::Square => 2,
+                                                                                SegmentGeneratorKind::Stairs => 3,
+                                                                            },
+                                                                            Ordering::Relaxed,
+                                                                        );
+
+                                                                        if ui
+                                                                            .add_sized(
+                                                                                egui::vec2(52.0, 24.0),
+                                                                                egui::Button::new(
+                                                                                    RichText::new("Gen")
+                                                                                        .color(Color32::from_hex("#FFEAD0").unwrap()),
+                                                                                ),
+                                                                            )
+                                                                            .clicked()
+                                                                        {
+                                                                            if let Some(mut curve) = lookup_curve.try_lock() {
+                                                                                if generate_segment_shape(
+                                                                                    &mut curve,
+                                                                                    &selected_knot_ids_for_generator,
+                                                                                    selected_generator,
+                                                                                    generator_cycles,
+                                                                                    generator_steps,
+                                                                                    current_symmetry_mode,
+                                                                                ) {
+                                                                                    curve_dirty.store(true, Ordering::Relaxed);
+                                                                                    plot_dirty_ptr.store(true, Ordering::Relaxed);
+                                                                                    if let Some(mut editor_ui) = editor.try_lock() {
+                                                                                        editor_ui.fit_to_curve(&curve);
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    });
+
+                                                                    ui.add_space(6.0);
+                                                                    ui.horizontal(|ui| {
+                                                                        if selected_generator
+                                                                            == SegmentGeneratorKind::Stairs
+                                                                        {
+                                                                            ui.label(
+                                                                                RichText::new("Steps")
+                                                                                    .size(12.5)
+                                                                                    .color(
+                                                                                        Color32::from_hex("#FFEAD0")
+                                                                                            .unwrap()
+                                                                                            .gamma_multiply(0.9),
+                                                                                    ),
+                                                                            );
+                                                                            if ui
+                                                                                .add(
+                                                                                    egui::Slider::new(
+                                                                                        &mut generator_steps,
+                                                                                        2..=64,
+                                                                                    )
+                                                                                    .show_value(true),
+                                                                                )
+                                                                                .changed()
+                                                                            {
+                                                                                segment_generator_steps_ptr.store(
+                                                                                    generator_steps,
+                                                                                    Ordering::Relaxed,
+                                                                                );
+                                                                            }
+                                                                        } else {
+                                                                            ui.label(
+                                                                                RichText::new("Cycles")
+                                                                                    .size(12.5)
+                                                                                    .color(
+                                                                                        Color32::from_hex("#FFEAD0")
+                                                                                            .unwrap()
+                                                                                            .gamma_multiply(0.9),
+                                                                                    ),
+                                                                            );
+                                                                            if ui
+                                                                                .add(
+                                                                                    egui::Slider::new(
+                                                                                        &mut generator_cycles,
+                                                                                        1..=32,
+                                                                                    )
+                                                                                    .show_value(true),
+                                                                                )
+                                                                                .changed()
+                                                                            {
+                                                                                segment_generator_cycles_ptr.store(
+                                                                                    generator_cycles,
+                                                                                    Ordering::Relaxed,
+                                                                                );
+                                                                            }
+                                                                        }
+                                                                    });
+                                                                } else {
+                                                                    // ui.label(
+                                                                    //     RichText::new("Select exactly two knots in the plot.")
+                                                                    //         .size(13.0)
+                                                                    //         .color(
+                                                                    //             Color32::from_hex("#FFEAD0")
+                                                                    //                 .unwrap()
+                                                                    //                 .gamma_multiply(0.85),
+                                                                    //         ),
+                                                                    // );
+                                                                    // ui.add_space(2.0);
+                                                                    ui.label(
+                                                                        RichText::new(
+                                                                            "Click the plot, then select two knots to generate sine and more...",
+                                                                        )
+                                                                        .size(12.5)
                                                                         .color(
                                                                             Color32::from_hex("#FFEAD0")
                                                                                 .unwrap()
-                                                                                .gamma_multiply(0.85),
+                                                                                .gamma_multiply(0.75),
                                                                         ),
-                                                                )
-                                                                .wrap(),
-                                                            );
+                                                                    );
+                                                                }
+                                                            } else {
+                                                                let help_title_size = if current_help_title == default_help_title {
+                                                                    20.0
+                                                                } else {
+                                                                    14.0
+                                                                };
+
+                                                                ui.label(
+                                                                    RichText::new(current_help_title.as_str())
+                                                                        .size(help_title_size)
+                                                                        .color(Color32::from_hex("#FFEAD0").unwrap()),
+                                                                );
+                                                                ui.add_space(1.0);
+                                                                ui.add(
+                                                                    egui::Label::new(
+                                                                        RichText::new(current_help_text.as_str())
+                                                                            .size(13.0)
+                                                                            .color(
+                                                                                Color32::from_hex("#FFEAD0")
+                                                                                    .unwrap()
+                                                                                    .gamma_multiply(0.85),
+                                                                            ),
+                                                                    )
+                                                                    .wrap(),
+                                                                );
+                                                            }
                                                         },
                                                     );
                                                 });
@@ -1987,4 +2207,104 @@ fn parse_trailing_version(name: &str) -> Option<(String, usize)> {
     let (base, version_str) = trimmed.rsplit_once(" v")?;
     let version = version_str.parse().ok()?;
     Some((base.to_string(), version))
+}
+
+fn generate_segment_shape(
+    curve: &mut LookupCurve,
+    selected_ids: &[usize],
+    kind: SegmentGeneratorKind,
+    cycles: usize,
+    steps: usize,
+    symmetry_mode: usize,
+) -> bool {
+    if selected_ids.len() != 2 {
+        return false;
+    }
+
+    let mut selected_knots: Vec<_> = curve
+        .knots()
+        .iter()
+        .copied()
+        .filter(|knot| selected_ids.contains(&knot.id))
+        .collect();
+    if selected_knots.len() != 2 {
+        return false;
+    }
+
+    selected_knots.sort_by(|a, b| {
+        a.position
+            .x
+            .partial_cmp(&b.position.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let left = selected_knots[0];
+    let right = selected_knots[1];
+    let dx = right.position.x - left.position.x;
+    if dx.abs() <= 1.0e-6 {
+        return false;
+    }
+
+    let mut all_knots = curve.knots().to_vec();
+    all_knots.retain(|knot| {
+        knot.id == left.id || knot.id == right.id || knot.position.x <= left.position.x || knot.position.x >= right.position.x
+    });
+
+    let point_count = match kind {
+        SegmentGeneratorKind::Square => 10,
+        SegmentGeneratorKind::Stairs => steps.max(2) * 2,
+        _ => 16,
+    };
+
+    let min_y = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+        -1.0
+    } else {
+        0.0
+    };
+    let cycles = cycles.max(1) as f32;
+
+    let sample_shape = |t: f32| -> f32 {
+        match kind {
+            SegmentGeneratorKind::Sine => 0.5 - 0.5 * (std::f32::consts::TAU * cycles * t).cos(),
+            SegmentGeneratorKind::Triangle => {
+                let phase = (t * cycles).fract();
+                if phase < 0.5 { phase * 2.0 } else { 2.0 - phase * 2.0 }
+            }
+            SegmentGeneratorKind::Square => {
+                let phase = (t * cycles).fract();
+                if phase < 0.5 { 0.0 } else { 1.0 }
+            }
+            SegmentGeneratorKind::Stairs => {
+                let total_steps = steps.max(2) as f32;
+                (t * total_steps).floor() / (total_steps - 1.0)
+            }
+        }
+    };
+
+    let mut generated = Vec::new();
+    for i in 1..point_count {
+        let t = i as f32 / point_count as f32;
+        let x = left.position.x + dx * t;
+        let shaped = sample_shape(t).clamp(0.0, 1.0);
+        let y = (left.position.y + (right.position.y - left.position.y) * shaped).clamp(min_y, 1.0);
+        generated.push(bevy_lookup_curve::Knot {
+            position: BevyVec2::new(x, y),
+            interpolation: match kind {
+                SegmentGeneratorKind::Stairs => bevy_lookup_curve::KnotInterpolation::Constant,
+                _ => bevy_lookup_curve::KnotInterpolation::Linear,
+            },
+            ..Default::default()
+        });
+    }
+
+    if let Some(left_idx) = all_knots.iter().position(|knot| knot.id == left.id) {
+        all_knots[left_idx].interpolation = match kind {
+            SegmentGeneratorKind::Stairs => bevy_lookup_curve::KnotInterpolation::Constant,
+            _ => bevy_lookup_curve::KnotInterpolation::Linear,
+        };
+    }
+
+    all_knots.extend(generated);
+    *curve = LookupCurve::new(all_knots);
+    true
 }
