@@ -1,4 +1,4 @@
-use bevy_lookup_curve::{editor::LookupCurveEguiEditor, LookupCurve};
+use bevy_lookup_curve::{editor::LookupCurveEguiEditor, KnotInterpolation, LookupCurve, TangentSide};
 use bevy_math::Vec2;
 use fundsp::prelude::*;
 use nih_plug::params::persist::PersistentField;
@@ -23,6 +23,7 @@ mod sout_ui;
 
 const MAX_OVERSAMPLING_FACTOR: usize = 3;
 const DEFAULT_OVERSAMPLING_FACTOR: usize = 0;
+const DBFS_FLOOR_DB: f32 = -60.0;
 pub const INTERPOLATION_MODE_LINEAR: usize = 0;
 pub const INTERPOLATION_MODE_COSINE: usize = 1;
 pub const INTERPOLATION_MODE_HERMITE: usize = 2;
@@ -30,6 +31,12 @@ pub const DEFAULT_INTERPOLATION_MODE: usize = INTERPOLATION_MODE_HERMITE;
 pub const SYMMETRY_MODE_SYMMETRIC: usize = 0;
 pub const SYMMETRY_MODE_ASYMMETRIC: usize = 1;
 pub const DEFAULT_SYMMETRY_MODE: usize = SYMMETRY_MODE_SYMMETRIC;
+pub const DISPLAY_MODE_LINEAR: usize = 0;
+pub const DISPLAY_MODE_DBFS: usize = 1;
+pub const DEFAULT_DISPLAY_MODE: usize = DISPLAY_MODE_LINEAR;
+pub const DISPLAY_SCOPE_Y_ONLY: usize = 0;
+pub const DISPLAY_SCOPE_XY: usize = 1;
+pub const DEFAULT_DISPLAY_SCOPE: usize = DISPLAY_SCOPE_XY;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PlotStateSnapshot {
@@ -57,6 +64,8 @@ pub struct WaverPlugin {
     pub current_oversampling_factor: Arc<AtomicUsize>,
     pub current_interpolation_mode: Arc<AtomicUsize>,
     pub current_oversampling_algorithm: Arc<AtomicUsize>,
+    pub current_display_mode: Arc<AtomicUsize>,
+    pub current_display_scope: Arc<AtomicUsize>,
     pub oversampling_times: Arc<AtomicF32>,
     pub oversamplers: Vec<ConfigurableOversampler>,
     pub reported_oversampling_factor: usize,
@@ -101,6 +110,12 @@ struct WaverPluginParams {
 
     #[persist = "oversampling_algorithm"]
     pub current_oversampling_algorithm: Arc<AtomicUsize>,
+
+    #[persist = "display_mode"]
+    pub current_display_mode: Arc<AtomicUsize>,
+
+    #[persist = "display_scope"]
+    pub current_display_scope: Arc<AtomicUsize>,
 
     #[persist = "current_preset"]
     pub current_preset: Arc<Mutex<String>>,
@@ -189,6 +204,8 @@ impl Default for WaverPlugin {
             current_oversampling_factor: params.current_oversampling_factor.clone(),
             current_interpolation_mode: params.current_interpolation_mode.clone(),
             current_oversampling_algorithm: params.current_oversampling_algorithm.clone(),
+            current_display_mode: params.current_display_mode.clone(),
+            current_display_scope: params.current_display_scope.clone(),
             oversampling_times: Arc::new(AtomicF32::new(oversampling_factor_to_times(
                 DEFAULT_OVERSAMPLING_FACTOR,
             ) as f32)),
@@ -220,6 +237,8 @@ impl Default for WaverPluginParams {
             colored_waveform: Arc::new(AtomicBool::new(false)),
             current_interpolation_mode: Arc::new(AtomicUsize::new(DEFAULT_INTERPOLATION_MODE)),
             current_oversampling_algorithm: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_ALGORITHM)),
+            current_display_mode: Arc::new(AtomicUsize::new(DEFAULT_DISPLAY_MODE)),
+            current_display_scope: Arc::new(AtomicUsize::new(DEFAULT_DISPLAY_SCOPE)),
             current_preset: Arc::new(Mutex::new(String::from("./Default.ron"))),
             saved_plot_state: Arc::new(Mutex::new(PlotStateSnapshot {
                 curve: lookup_curve.clone(),
@@ -410,6 +429,8 @@ impl Plugin for WaverPlugin {
                                 linear_ext_enabled,
                                 interpolation_mode,
                                 symmetry_mode,
+                                self.current_display_mode.load(Ordering::Relaxed),
+                                self.current_display_scope.load(Ordering::Relaxed),
                             );
                             let wet_signal = shaped * post_gain;
                             *sample = dry_signal * (1.0 - mix) + wet_signal * mix;
@@ -458,6 +479,8 @@ impl Plugin for WaverPlugin {
             self.current_oversampling_factor.clone(),
             self.current_interpolation_mode.clone(),
             self.current_oversampling_algorithm.clone(),
+            self.current_display_mode.clone(),
+            self.current_display_scope.clone(),
         )
     }
 }
@@ -619,7 +642,7 @@ pub fn sample_lut(lut: &[f32], index: usize, fraction: f32, interpolation_mode: 
     }
 }
 
-pub fn curve_lookup(
+pub fn curve_lookup_chart(
     lut: &[f32],
     input: f32,
     linear_ext_enabled: bool,
@@ -695,6 +718,289 @@ pub fn curve_lookup(
         };
 
         curve_val * input.signum()
+    }
+}
+
+pub fn curve_lookup(
+    lut: &[f32],
+    input: f32,
+    linear_ext_enabled: bool,
+    interpolation_mode: usize,
+    symmetry_mode: usize,
+    display_mode: usize,
+    display_scope: usize,
+) -> f32 {
+    if display_mode != DISPLAY_MODE_DBFS {
+        return curve_lookup_chart(lut, input, linear_ext_enabled, interpolation_mode, symmetry_mode);
+    }
+
+    if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+        let chart_input = if display_scope == DISPLAY_SCOPE_XY {
+            signed_audio_to_dbfs_chart(input)
+        } else {
+            input
+        };
+        let chart_output =
+            curve_lookup_chart(lut, chart_input, linear_ext_enabled, interpolation_mode, symmetry_mode);
+        chart_output_to_audio(chart_output, true)
+    } else {
+        let sign = input.signum();
+        let magnitude = input.abs();
+        let chart_input = if display_scope == DISPLAY_SCOPE_XY {
+            audio_to_dbfs_chart(magnitude)
+        } else {
+            magnitude
+        };
+        let chart_output =
+            curve_lookup_chart(lut, chart_input, linear_ext_enabled, interpolation_mode, symmetry_mode);
+        chart_output_to_audio(chart_output, false) * sign
+    }
+}
+
+pub fn audio_input_to_chart_input(
+    input: f32,
+    symmetry_mode: usize,
+    display_mode: usize,
+    display_scope: usize,
+) -> f32 {
+    if display_mode != DISPLAY_MODE_DBFS || display_scope != DISPLAY_SCOPE_XY {
+        if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+            input
+        } else {
+            input.abs()
+        }
+    } else if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+        signed_audio_to_dbfs_chart(input)
+    } else {
+        audio_to_dbfs_chart(input.abs())
+    }
+}
+
+pub fn chart_output_to_audio_output(
+    chart_output: f32,
+    symmetry_mode: usize,
+    display_mode: usize,
+) -> f32 {
+    if display_mode != DISPLAY_MODE_DBFS {
+        return if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+            chart_output
+        } else {
+            chart_output.abs()
+        };
+    }
+
+    chart_output_to_audio(chart_output, symmetry_mode == SYMMETRY_MODE_ASYMMETRIC)
+}
+
+pub fn is_default_linear_curve(curve: &LookupCurve, symmetry_mode: usize) -> bool {
+    let knots = curve.knots();
+    if symmetry_mode != SYMMETRY_MODE_SYMMETRIC || knots.len() != 2 {
+        return false;
+    }
+
+    let first = knots[0];
+    let second = knots[1];
+    positions_close(first.position, Vec2::new(0.0, 0.0))
+        && positions_close(second.position, Vec2::new(1.0, 1.0))
+        && matches!(first.interpolation, KnotInterpolation::Linear)
+        && matches!(second.interpolation, KnotInterpolation::Linear)
+}
+
+pub fn build_default_dbfs_curve(symmetry_mode: usize) -> LookupCurve {
+    if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+        let points = [
+            -1.0_f32,
+            -0.316_227_76,
+            -0.1,
+            -0.031_622_776,
+            -0.01,
+            -0.003_162_277_6,
+            -0.001,
+            0.0,
+            0.001,
+            0.003_162_277_6,
+            0.01,
+            0.031_622_776,
+            0.1,
+            0.316_227_76,
+            1.0,
+        ];
+        build_dbfs_cubic_curve(&points, true)
+    } else {
+        let points = [
+            0.0_f32,
+            0.001,
+            0.003_162_277_6,
+            0.01,
+            0.031_622_776,
+            0.1,
+            0.316_227_76,
+            1.0,
+        ];
+        build_dbfs_cubic_curve(&points, false)
+    }
+}
+
+fn audio_to_dbfs_chart(value: f32) -> f32 {
+    if value <= 0.0 {
+        0.0
+    } else if value >= 1.0 {
+        value
+    } else {
+        ((20.0 * value.log10()).max(DBFS_FLOOR_DB) - DBFS_FLOOR_DB) / -DBFS_FLOOR_DB
+    }
+}
+
+fn dbfs_chart_to_audio(value: f32) -> f32 {
+    if value <= 0.0 {
+        0.0
+    } else if value >= 1.0 {
+        value
+    } else {
+        10.0_f32.powf((value * -DBFS_FLOOR_DB + DBFS_FLOOR_DB) / 20.0)
+    }
+}
+
+fn signed_audio_to_dbfs_chart(value: f32) -> f32 {
+    let sign = value.signum();
+    let magnitude = value.abs();
+    if magnitude >= 1.0 {
+        value
+    } else {
+        sign * audio_to_dbfs_chart(magnitude)
+    }
+}
+
+fn chart_output_to_audio(value: f32, bipolar: bool) -> f32 {
+    if !bipolar {
+        return dbfs_chart_to_audio(value);
+    }
+
+    let sign = value.signum();
+    let magnitude = value.abs();
+    if magnitude >= 1.0 {
+        value
+    } else {
+        sign * dbfs_chart_to_audio(magnitude)
+    }
+}
+
+fn positions_close(a: Vec2, b: Vec2) -> bool {
+    const EPS: f32 = 1.0e-6;
+    (a.x - b.x).abs() <= EPS && (a.y - b.y).abs() <= EPS
+}
+
+fn build_dbfs_cubic_curve(xs: &[f32], bipolar: bool) -> LookupCurve {
+    let points: Vec<Vec2> = xs
+        .iter()
+        .copied()
+        .map(|x| {
+            let y = if bipolar {
+                signed_audio_to_dbfs_chart(x)
+            } else {
+                audio_to_dbfs_chart(x)
+            };
+            Vec2::new(x, y)
+        })
+        .collect();
+    let slopes = monotone_cubic_slopes(&points);
+
+    let knots = points
+        .iter()
+        .enumerate()
+        .map(|(i, point)| {
+            let mut knot = bevy_lookup_curve::Knot {
+                position: *point,
+                interpolation: if i + 1 < points.len() {
+                    KnotInterpolation::Cubic
+                } else {
+                    KnotInterpolation::Linear
+                },
+                ..Default::default()
+            };
+            knot = knot.with_tangent_slope(TangentSide::Left, slopes[i]);
+            knot = knot.with_tangent_slope(TangentSide::Right, slopes[i]);
+
+            if i > 0 {
+                knot = knot.with_tangent_weight(
+                    TangentSide::Left,
+                    Some(dbfs_segment_weight(points[i - 1].x, points[i].x)),
+                );
+            }
+            if i + 1 < points.len() {
+                knot = knot.with_tangent_weight(
+                    TangentSide::Right,
+                    Some(dbfs_segment_weight(points[i].x, points[i + 1].x)),
+                );
+            }
+
+            knot
+        })
+        .collect();
+
+    LookupCurve::new(knots)
+}
+
+fn monotone_cubic_slopes(points: &[Vec2]) -> Vec<f32> {
+    let n = points.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![0.0];
+    }
+
+    let mut h = Vec::with_capacity(n - 1);
+    let mut delta = Vec::with_capacity(n - 1);
+    for window in points.windows(2) {
+        let dx = (window[1].x - window[0].x).max(f32::EPSILON);
+        h.push(dx);
+        delta.push((window[1].y - window[0].y) / dx);
+    }
+
+    let mut slopes = vec![0.0; n];
+    if n == 2 {
+        slopes[0] = delta[0];
+        slopes[1] = delta[0];
+        return slopes;
+    }
+
+    slopes[0] = monotone_endpoint_slope(h[0], h[1], delta[0], delta[1]);
+    slopes[n - 1] = monotone_endpoint_slope(h[n - 2], h[n - 3], delta[n - 2], delta[n - 3]);
+
+    for i in 1..(n - 1) {
+        let d0 = delta[i - 1];
+        let d1 = delta[i];
+        if d0.abs() <= f32::EPSILON || d1.abs() <= f32::EPSILON || d0.signum() != d1.signum() {
+            slopes[i] = 0.0;
+        } else {
+            let w1 = 2.0 * h[i] + h[i - 1];
+            let w2 = h[i] + 2.0 * h[i - 1];
+            slopes[i] = (w1 + w2) / ((w1 / d0) + (w2 / d1));
+        }
+    }
+
+    slopes
+}
+
+fn monotone_endpoint_slope(h0: f32, h1: f32, d0: f32, d1: f32) -> f32 {
+    let mut slope = ((2.0 * h0 + h1) * d0 - h0 * d1) / (h0 + h1).max(f32::EPSILON);
+    if slope.signum() != d0.signum() {
+        slope = 0.0;
+    } else if d0.signum() != d1.signum() && slope.abs() > 3.0 * d0.abs() {
+        slope = 3.0 * d0;
+    }
+    slope
+}
+
+fn dbfs_segment_weight(x0: f32, x1: f32) -> f32 {
+    let max_x = x0.abs().max(x1.abs());
+    if max_x <= 0.01 {
+        0.24
+    } else if max_x <= 0.1 {
+        0.28
+    } else {
+        1.0 / 3.0
     }
 }
 

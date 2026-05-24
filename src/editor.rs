@@ -5,6 +5,7 @@ use std::sync::{
 use std::collections::VecDeque;
 
 use bevy_lookup_curve::{editor::LookupCurveEguiEditor, LookupCurve};
+use bevy_math::Vec2 as BevyVec2;
 use nih_plug::{
     editor::Editor,
     nih_error,
@@ -17,13 +18,16 @@ use nih_plug_egui::{
 use parking_lot::Mutex;
 
 use crate::{
-    capture_plot_state, curve_lookup, fs, load_image_from_memory, load_preset_file, save_preset_file,
+    audio_input_to_chart_input, build_default_dbfs_curve, capture_plot_state, curve_lookup,
+    curve_lookup_chart, fs, is_default_linear_curve, load_image_from_memory, load_preset_file,
+    save_preset_file,
     sync_lut_cache_from_state, transform_curve_for_symmetry_mode,
     oversampling::{OVERSAMPLING_ALGORITHM_FLAT_FIR, OVERSAMPLING_ALGORITHM_LANCZOS3},
     param_knob::ParamKnob,
     sout_ui::{self, SoutTheme},
     DEFAULT_SYMMETRY_MODE, WaverPluginParams, INTERPOLATION_MODE_COSINE, INTERPOLATION_MODE_HERMITE,
     INTERPOLATION_MODE_LINEAR, SYMMETRY_MODE_ASYMMETRIC, SYMMETRY_MODE_SYMMETRIC,
+    DISPLAY_MODE_DBFS, DISPLAY_MODE_LINEAR, DISPLAY_SCOPE_XY, DISPLAY_SCOPE_Y_ONLY,
 };
 
 pub struct EditorData {
@@ -68,6 +72,8 @@ impl EditorData {
         current_oversampling_factor: Arc<AtomicUsize>,
         current_interpolation_mode: Arc<AtomicUsize>,
         current_oversampling_algorithm: Arc<AtomicUsize>,
+        current_display_mode: Arc<AtomicUsize>,
+        current_display_scope: Arc<AtomicUsize>,
     ) -> Option<Box<dyn Editor>> {
         let lookup_curve = self.lookup_curve.clone();
         let curve_dirty = self.curve_dirty.clone();
@@ -86,6 +92,8 @@ impl EditorData {
         let current_oversampling_factor_ptr = current_oversampling_factor.clone();
         let current_interpolation_mode_ptr = current_interpolation_mode.clone();
         let current_oversampling_algorithm_ptr = current_oversampling_algorithm.clone();
+        let current_display_mode_ptr = current_display_mode.clone();
+        let current_display_scope_ptr = current_display_scope.clone();
         let open_save_modal_ptr = self.open_save_modal.clone();
         let open_msg_modal_ptr = self.open_msg_modal.clone();
         let open_about_modal_ptr = self.open_about_modal.clone();
@@ -503,6 +511,105 @@ impl EditorData {
                                                     });
 
                                                     ui.add_space(12.0);
+                                                    ui.label("Scale");
+                                                    ui.add_space(6.0);
+
+                                                    ui.scope(|ui| {
+                                                        let visuals = ui.visuals_mut();
+                                                        sout_ui::make_combobox_visuals(
+                                                            visuals,
+                                                            Color32::from_hex("#554e4a").unwrap(),
+                                                        );
+                                                        ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                        let current_mode =
+                                                            current_display_mode_ptr.load(Ordering::Relaxed);
+                                                        let mut selected_mode = current_mode;
+
+                                                        egui::ComboBox::from_id_salt("settings_display_mode_selector")
+                                                            .width(220.0)
+                                                            .selected_text(display_mode_label(current_mode))
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(
+                                                                    &mut selected_mode,
+                                                                    DISPLAY_MODE_LINEAR,
+                                                                    "Linear",
+                                                                );
+                                                                ui.selectable_value(
+                                                                    &mut selected_mode,
+                                                                    DISPLAY_MODE_DBFS,
+                                                                    "dBFS",
+                                                                );
+                                                            });
+
+                                                        if selected_mode != current_mode {
+                                                            current_display_mode_ptr
+                                                                .store(selected_mode, Ordering::Relaxed);
+                                                        }
+                                                    });
+
+                                                    ui.add_space(12.0);
+                                                    ui.label("dBFS Scope");
+                                                    ui.add_space(6.0);
+
+                                                    ui.scope(|ui| {
+                                                        let visuals = ui.visuals_mut();
+                                                        sout_ui::make_combobox_visuals(
+                                                            visuals,
+                                                            Color32::from_hex("#554e4a").unwrap(),
+                                                        );
+                                                        ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                        let current_scope =
+                                                            current_display_scope_ptr.load(Ordering::Relaxed);
+                                                        let mut selected_scope = current_scope;
+                                                        let current_display_mode =
+                                                            current_display_mode_ptr.load(Ordering::Relaxed);
+
+                                                        egui::ComboBox::from_id_salt("settings_display_scope_selector")
+                                                            .width(220.0)
+                                                            .selected_text(display_scope_label(current_scope))
+                                                            .show_ui(ui, |ui| {
+                                                                ui.selectable_value(
+                                                                    &mut selected_scope,
+                                                                    DISPLAY_SCOPE_Y_ONLY,
+                                                                    "Y only",
+                                                                );
+                                                                ui.selectable_value(
+                                                                    &mut selected_scope,
+                                                                    DISPLAY_SCOPE_XY,
+                                                                    "X+Y",
+                                                                );
+                                                            });
+
+                                                        if selected_scope != current_scope {
+                                                            if current_display_mode == DISPLAY_MODE_DBFS
+                                                                && selected_scope == DISPLAY_SCOPE_Y_ONLY
+                                                            {
+                                                                let current_symmetry_mode =
+                                                                    symmetry_mode_ptr.load(Ordering::Relaxed);
+                                                                if let Some(mut curve) = lookup_curve.try_lock() {
+                                                                    if is_default_linear_curve(
+                                                                        &curve,
+                                                                        current_symmetry_mode,
+                                                                    ) {
+                                                                        *curve = build_default_dbfs_curve(
+                                                                            current_symmetry_mode,
+                                                                        );
+                                                                        curve_dirty.store(true, Ordering::Relaxed);
+                                                                        plot_dirty_ptr.store(true, Ordering::Relaxed);
+                                                                        if let Some(mut editor_ui) = editor.try_lock() {
+                                                                            editor_ui.fit_to_curve(&curve);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            current_display_scope_ptr
+                                                                .store(selected_scope, Ordering::Relaxed);
+                                                        }
+                                                    });
+
+                                                    ui.add_space(12.0);
                                                     ui.label("Oversampling");
                                                     ui.add_space(6.0);
 
@@ -693,11 +800,16 @@ impl EditorData {
                                             0.0
                                         };
                                         let editor_domain_max = 1.0;
-                                        let display_input = if current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
-                                            current_t
-                                        } else {
-                                            current_t.abs()
-                                        };
+                                        let current_display_mode =
+                                            current_display_mode_ptr.load(Ordering::Relaxed);
+                                        let current_display_scope =
+                                            current_display_scope_ptr.load(Ordering::Relaxed);
+                                        let display_input = audio_input_to_chart_input(
+                                            current_t,
+                                            current_symmetry_mode,
+                                            current_display_mode,
+                                            current_display_scope,
+                                        );
                                         let should_draw_manual_indicator =
                                             linear_ext_enabled && display_input.abs() > editor_domain_max;
                                         let sample_for_editor = if should_draw_manual_indicator {
@@ -706,6 +818,10 @@ impl EditorData {
                                             Some(display_input.clamp(editor_domain_min, editor_domain_max))
                                         };
                                         editor_ui.bipolar = current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC;
+                                        editor_ui.dbfs_view = false;
+                                        editor_ui.dbfs_axis_only = current_display_mode == DISPLAY_MODE_DBFS;
+                                        editor_ui.dbfs_x_axis_labels = current_display_mode == DISPLAY_MODE_DBFS
+                                            && current_display_scope == DISPLAY_SCOPE_XY;
 
                                         // curve editor
                                         egui::Frame::new()
@@ -731,15 +847,13 @@ impl EditorData {
                                                             plot_dirty_ptr.store(true, Ordering::Relaxed);
                                                         }
 
-                                                        let curve_to_screen = |curve_x: f32, curve_y: f32| -> Pos2 {
-                                                            let canvas_x = (curve_x - editor_ui.offset.x) * editor_ui.editor_size.x
-                                                                / editor_ui.scale.x;
-                                                            let canvas_y = editor_ui.editor_size.y
-                                                                - ((curve_y - editor_ui.offset.y) * editor_ui.editor_size.y
-                                                                    / editor_ui.scale.y);
-
-                                                            egui::pos2(curve_rect.left() + canvas_x, curve_rect.top() + canvas_y)
-                                                        };
+                                                        let curve_to_screen =
+                                                            |curve_x: f32, curve_y: f32| -> Pos2 {
+                                                                editor_ui.curve_to_screen(
+                                                                    curve_rect,
+                                                                    BevyVec2::new(curve_x, curve_y),
+                                                                )
+                                                            };
 
                                                         top_y = curve_to_screen(1.0, 1.0).y;
                                                         bottom_y = if current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
@@ -757,14 +871,17 @@ impl EditorData {
                                                                     current_interpolation_mode_ptr
                                                                         .load(Ordering::Relaxed),
                                                                     current_symmetry_mode,
+                                                                    current_display_mode,
+                                                                    current_display_scope,
                                                                 );
-                                                                let display_curve_y = if current_symmetry_mode
-                                                                    == SYMMETRY_MODE_ASYMMETRIC
-                                                                {
-                                                                    actual_curve_y
-                                                                } else {
-                                                                    actual_curve_y.abs()
-                                                                };
+                                                                let display_curve_y = curve_lookup_chart(
+                                                                    &lut,
+                                                                    display_input,
+                                                                    linear_ext_enabled,
+                                                                    current_interpolation_mode_ptr
+                                                                        .load(Ordering::Relaxed),
+                                                                    current_symmetry_mode,
+                                                                );
                                                                 if !display_curve_y.is_finite() {
                                                                     preview_output_screen_y = None;
                                                                     preview_output_value = None;
@@ -783,7 +900,7 @@ impl EditorData {
                                                                 }
 
                                                                 preview_output_screen_y = Some(indicator_pos.y);
-                                                                preview_output_value = Some(display_curve_y);
+                                                                preview_output_value = Some(actual_curve_y);
 
                                                                 ui.painter().line_segment(
                                                                     [
@@ -834,14 +951,10 @@ impl EditorData {
                                                                     current_interpolation_mode_ptr
                                                                         .load(Ordering::Relaxed),
                                                                     current_symmetry_mode,
+                                                                    current_display_mode,
+                                                                    current_display_scope,
                                                                 );
-                                                                preview_output_value = Some(
-                                                                    if current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
-                                                                        actual_curve_y
-                                                                    } else {
-                                                                        actual_curve_y.abs()
-                                                                    },
-                                                                );
+                                                                preview_output_value = Some(actual_curve_y);
                                                             }
                                                         }
                                                     });
@@ -1492,6 +1605,20 @@ fn oversampling_algorithm_label(mode: usize) -> &'static str {
         OVERSAMPLING_ALGORITHM_LANCZOS3 => "Lanczos3",
         OVERSAMPLING_ALGORITHM_FLAT_FIR => "Flat FIR",
         _ => "Lanczos3",
+    }
+}
+
+fn display_mode_label(mode: usize) -> &'static str {
+    match mode {
+        DISPLAY_MODE_DBFS => "dBFS",
+        _ => "Linear",
+    }
+}
+
+fn display_scope_label(mode: usize) -> &'static str {
+    match mode {
+        DISPLAY_SCOPE_XY => "X+Y",
+        _ => "Y only",
     }
 }
 
