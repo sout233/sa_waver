@@ -66,6 +66,7 @@ pub struct WaverPlugin {
     pub current_oversampling_algorithm: Arc<AtomicUsize>,
     pub current_display_mode: Arc<AtomicUsize>,
     pub current_display_scope: Arc<AtomicUsize>,
+    pub current_strict_dbfs_ticks: Arc<AtomicBool>,
     pub oversampling_times: Arc<AtomicF32>,
     pub oversamplers: Vec<ConfigurableOversampler>,
     pub reported_oversampling_factor: usize,
@@ -116,6 +117,9 @@ struct WaverPluginParams {
 
     #[persist = "display_scope"]
     pub current_display_scope: Arc<AtomicUsize>,
+
+    #[persist = "strict_dbfs_ticks"]
+    pub current_strict_dbfs_ticks: Arc<AtomicBool>,
 
     #[persist = "current_preset"]
     pub current_preset: Arc<Mutex<String>>,
@@ -206,6 +210,7 @@ impl Default for WaverPlugin {
             current_oversampling_algorithm: params.current_oversampling_algorithm.clone(),
             current_display_mode: params.current_display_mode.clone(),
             current_display_scope: params.current_display_scope.clone(),
+            current_strict_dbfs_ticks: params.current_strict_dbfs_ticks.clone(),
             oversampling_times: Arc::new(AtomicF32::new(oversampling_factor_to_times(
                 DEFAULT_OVERSAMPLING_FACTOR,
             ) as f32)),
@@ -239,6 +244,7 @@ impl Default for WaverPluginParams {
             current_oversampling_algorithm: Arc::new(AtomicUsize::new(DEFAULT_OVERSAMPLING_ALGORITHM)),
             current_display_mode: Arc::new(AtomicUsize::new(DEFAULT_DISPLAY_MODE)),
             current_display_scope: Arc::new(AtomicUsize::new(DEFAULT_DISPLAY_SCOPE)),
+            current_strict_dbfs_ticks: Arc::new(AtomicBool::new(false)),
             current_preset: Arc::new(Mutex::new(String::from("./Default.ron"))),
             saved_plot_state: Arc::new(Mutex::new(PlotStateSnapshot {
                 curve: lookup_curve.clone(),
@@ -481,6 +487,7 @@ impl Plugin for WaverPlugin {
             self.current_oversampling_algorithm.clone(),
             self.current_display_mode.clone(),
             self.current_display_scope.clone(),
+            self.current_strict_dbfs_ticks.clone(),
         )
     }
 }

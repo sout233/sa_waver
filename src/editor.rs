@@ -74,6 +74,7 @@ impl EditorData {
         current_oversampling_algorithm: Arc<AtomicUsize>,
         current_display_mode: Arc<AtomicUsize>,
         current_display_scope: Arc<AtomicUsize>,
+        current_strict_dbfs_ticks: Arc<AtomicBool>,
     ) -> Option<Box<dyn Editor>> {
         let lookup_curve = self.lookup_curve.clone();
         let curve_dirty = self.curve_dirty.clone();
@@ -94,6 +95,7 @@ impl EditorData {
         let current_oversampling_algorithm_ptr = current_oversampling_algorithm.clone();
         let current_display_mode_ptr = current_display_mode.clone();
         let current_display_scope_ptr = current_display_scope.clone();
+        let current_strict_dbfs_ticks_ptr = current_strict_dbfs_ticks.clone();
         let open_save_modal_ptr = self.open_save_modal.clone();
         let open_msg_modal_ptr = self.open_msg_modal.clone();
         let open_about_modal_ptr = self.open_about_modal.clone();
@@ -610,6 +612,23 @@ impl EditorData {
                                                     });
 
                                                     ui.add_space(12.0);
+                                                    ui.label("dBFS Ticks");
+                                                    ui.add_space(6.0);
+
+                                                    let mut strict_dbfs_ticks =
+                                                        current_strict_dbfs_ticks_ptr.load(Ordering::Relaxed);
+                                                    if ui
+                                                        .checkbox(
+                                                            &mut strict_dbfs_ticks,
+                                                            "Use experimental dB spacing",
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        current_strict_dbfs_ticks_ptr
+                                                            .store(strict_dbfs_ticks, Ordering::Relaxed);
+                                                    }
+
+                                                    ui.add_space(12.0);
                                                     ui.label("Oversampling");
                                                     ui.add_space(6.0);
 
@@ -818,10 +837,16 @@ impl EditorData {
                                             Some(display_input.clamp(editor_domain_min, editor_domain_max))
                                         };
                                         editor_ui.bipolar = current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC;
-                                        editor_ui.dbfs_view = false;
-                                        editor_ui.dbfs_axis_only = current_display_mode == DISPLAY_MODE_DBFS;
-                                        editor_ui.dbfs_x_axis_labels = current_display_mode == DISPLAY_MODE_DBFS
-                                            && current_display_scope == DISPLAY_SCOPE_XY;
+                                        let strict_dbfs_view =
+                                            current_display_mode == DISPLAY_MODE_DBFS
+                                                && current_strict_dbfs_ticks_ptr.load(Ordering::Relaxed);
+                                        editor_ui.configure_dbfs_mode(
+                                            strict_dbfs_view,
+                                            current_display_mode == DISPLAY_MODE_DBFS && !strict_dbfs_view,
+                                            current_display_mode == DISPLAY_MODE_DBFS
+                                                && current_display_scope == DISPLAY_SCOPE_XY,
+                                            strict_dbfs_view,
+                                        );
 
                                         // curve editor
                                         egui::Frame::new()
