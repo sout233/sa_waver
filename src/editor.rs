@@ -47,6 +47,7 @@ pub struct EditorData {
     pub open_msg_modal: Arc<AtomicBool>,
     pub open_about_modal: Arc<AtomicBool>,
     pub open_settings_modal: Arc<AtomicBool>,
+    pub settings_tab: Arc<AtomicUsize>,
     pub help_panel_title: Arc<Mutex<String>>,
     pub help_panel_text: Arc<Mutex<String>>,
     pub msg_modal_title: Arc<Mutex<String>>,
@@ -104,6 +105,7 @@ impl EditorData {
         let open_msg_modal_ptr = self.open_msg_modal.clone();
         let open_about_modal_ptr = self.open_about_modal.clone();
         let open_settings_modal_ptr = self.open_settings_modal.clone();
+        let settings_tab_ptr = self.settings_tab.clone();
         let help_panel_title_ptr = self.help_panel_title.clone();
         let help_panel_text_ptr = self.help_panel_text.clone();
         let saving_preset_name_ptr = self.saving_preset_name.clone();
@@ -235,7 +237,7 @@ impl EditorData {
                                                             ),
                                                         );
 
-                                                        let icon_pos = response.rect.center() + egui::vec2(-1.8, -0.5);
+                                                        let icon_pos = response.rect.center() + egui::vec2(-2.5, -0.8);
                                                         ui.painter().text(
                                                             icon_pos,
                                                             egui::Align2::CENTER_CENTER,
@@ -431,312 +433,555 @@ impl EditorData {
 
                                             if open_settings_modal_ptr.load(Ordering::Relaxed) {
                                                 let modal = Modal::new(Id::new("Settings Modal")).show(ui.ctx(), |ui| {
-                                                    ui.set_width(340.0);
-                                                    ui.heading("Settings");
-                                                    ui.add_space(8.0);
-                                                    ui.label("Timebase");
-                                                    ui.add_space(6.0);
+                                                    ui.set_width(620.0);
+                                                    ui.set_min_width(620.0);
 
-                                                    ui.scope(|ui| {
-                                                        let visuals = ui.visuals_mut();
-                                                        sout_ui::make_combobox_visuals(
-                                                            visuals,
-                                                            Color32::from_hex("#554e4a").unwrap(),
+                                                    let frame_fill = Color32::from_hex("#2f2a27").unwrap();
+                                                    let panel_fill = Color32::from_hex("#3a3430").unwrap();
+                                                    let tab_idle = Color32::from_hex("#4a433e").unwrap();
+                                                    let tab_active = Color32::from_hex("#DB9160").unwrap();
+                                                    let border_color =
+                                                        Color32::from_hex("#FFEAD0").unwrap().gamma_multiply(0.35);
+                                                    let mut current_settings_tab =
+                                                        settings_tab_ptr.load(Ordering::Relaxed);
+
+                                                    let section_label = |ui: &mut egui::Ui, title: &str| {
+                                                        ui.label(
+                                                            RichText::new(title)
+                                                                .size(12.0)
+                                                                .color(Color32::from_hex("#FFEAD0").unwrap()),
                                                         );
-                                                        ui.style_mut().spacing.interact_size.y = 24.0;
+                                                        ui.add_space(6.0);
+                                                    };
 
-                                                        let current_val = current_timebase_ptr.load(Ordering::Relaxed);
-                                                        let mut selected_val = current_val;
-
-                                                        egui::ComboBox::from_id_salt("settings_timebase_selector")
-                                                            .width(220.0)
-                                                            .selected_text(format!("{}", current_val))
-                                                            .show_ui(ui, |ui| {
-                                                                ui.selectable_value(&mut selected_val, 128, "128");
-                                                                ui.selectable_value(&mut selected_val, 256, "256");
-                                                                ui.selectable_value(&mut selected_val, 512, "512");
-                                                                ui.selectable_value(&mut selected_val, 1024, "1024");
-
-                                                                ui.separator();
-                                                                ui.horizontal(|ui| {
-                                                                    ui.label("Custom:");
-                                                                    ui.add(
-                                                                        egui::DragValue::new(&mut selected_val)
-                                                                            .clamp_existing_to_range(true)
-                                                                            .range(64..=4096),
-                                                                    );
-                                                                });
-                                                            });
-
-                                                        if selected_val != current_val {
-                                                            current_timebase_ptr.store(selected_val, Ordering::Relaxed);
-                                                        }
-                                                    });
-
-                                                    ui.add_space(12.0);
-                                                    ui.label("Interpolation");
-                                                    ui.add_space(6.0);
-
-                                                    ui.scope(|ui| {
-                                                        let visuals = ui.visuals_mut();
-                                                        sout_ui::make_combobox_visuals(
-                                                            visuals,
-                                                            Color32::from_hex("#554e4a").unwrap(),
-                                                        );
-                                                        ui.style_mut().spacing.interact_size.y = 24.0;
-
-                                                        let current_mode = current_interpolation_mode_ptr
-                                                            .load(Ordering::Relaxed);
-                                                        let mut selected_mode = current_mode;
-
-                                                        egui::ComboBox::from_id_salt("settings_interpolation_selector")
-                                                            .width(220.0)
-                                                            .selected_text(interpolation_mode_label(current_mode))
-                                                            .show_ui(ui, |ui| {
-                                                                ui.selectable_value(
-                                                                    &mut selected_mode,
-                                                                    INTERPOLATION_MODE_LINEAR,
-                                                                    "Linear",
-                                                                );
-                                                                ui.selectable_value(
-                                                                    &mut selected_mode,
-                                                                    INTERPOLATION_MODE_COSINE,
-                                                                    "Cosine",
-                                                                );
-                                                                ui.selectable_value(
-                                                                    &mut selected_mode,
-                                                                    INTERPOLATION_MODE_HERMITE,
-                                                                    "Hermite",
-                                                                );
-                                                            });
-
-                                                        if selected_mode != current_mode {
-                                                            current_interpolation_mode_ptr
-                                                                .store(selected_mode, Ordering::Relaxed);
-                                                        }
-                                                    });
-
-                                                    ui.add_space(12.0);
-                                                    ui.label("Scale");
-                                                    ui.add_space(6.0);
-
-                                                    ui.scope(|ui| {
-                                                        let visuals = ui.visuals_mut();
-                                                        sout_ui::make_combobox_visuals(
-                                                            visuals,
-                                                            Color32::from_hex("#554e4a").unwrap(),
-                                                        );
-                                                        ui.style_mut().spacing.interact_size.y = 24.0;
-
-                                                        let current_mode =
-                                                            current_display_mode_ptr.load(Ordering::Relaxed);
-                                                        let mut selected_mode = current_mode;
-
-                                                        egui::ComboBox::from_id_salt("settings_display_mode_selector")
-                                                            .width(220.0)
-                                                            .selected_text(display_mode_label(current_mode))
-                                                            .show_ui(ui, |ui| {
-                                                                ui.selectable_value(
-                                                                    &mut selected_mode,
-                                                                    DISPLAY_MODE_LINEAR,
-                                                                    "Linear",
-                                                                );
-                                                                ui.selectable_value(
-                                                                    &mut selected_mode,
-                                                                    DISPLAY_MODE_DBFS,
-                                                                    "dBFS",
-                                                                );
-                                                            });
-
-                                                        if selected_mode != current_mode {
-                                                            current_display_mode_ptr
-                                                                .store(selected_mode, Ordering::Relaxed);
-                                                        }
-                                                    });
-
-                                                    ui.add_space(12.0);
-                                                    ui.label("dBFS Scope");
-                                                    ui.add_space(6.0);
-
-                                                    ui.scope(|ui| {
-                                                        let visuals = ui.visuals_mut();
-                                                        sout_ui::make_combobox_visuals(
-                                                            visuals,
-                                                            Color32::from_hex("#554e4a").unwrap(),
-                                                        );
-                                                        ui.style_mut().spacing.interact_size.y = 24.0;
-
-                                                        let current_scope =
-                                                            current_display_scope_ptr.load(Ordering::Relaxed);
-                                                        let mut selected_scope = current_scope;
-                                                        let current_display_mode =
-                                                            current_display_mode_ptr.load(Ordering::Relaxed);
-
-                                                        egui::ComboBox::from_id_salt("settings_display_scope_selector")
-                                                            .width(220.0)
-                                                            .selected_text(display_scope_label(current_scope))
-                                                            .show_ui(ui, |ui| {
-                                                                ui.selectable_value(
-                                                                    &mut selected_scope,
-                                                                    DISPLAY_SCOPE_Y_ONLY,
-                                                                    "Y only",
-                                                                );
-                                                                ui.selectable_value(
-                                                                    &mut selected_scope,
-                                                                    DISPLAY_SCOPE_XY,
-                                                                    "X+Y",
-                                                                );
-                                                            });
-
-                                                        if selected_scope != current_scope {
-                                                            if current_display_mode == DISPLAY_MODE_DBFS
-                                                                && selected_scope == DISPLAY_SCOPE_Y_ONLY
-                                                            {
-                                                                let current_symmetry_mode =
-                                                                    symmetry_mode_ptr.load(Ordering::Relaxed);
-                                                                if let Some(mut curve) = lookup_curve.try_lock() {
-                                                                    if is_default_linear_curve(
-                                                                        &curve,
-                                                                        current_symmetry_mode,
-                                                                    ) {
-                                                                        *curve = build_default_dbfs_curve(
-                                                                            current_symmetry_mode,
-                                                                        );
-                                                                        curve_dirty.store(true, Ordering::Relaxed);
-                                                                        plot_dirty_ptr.store(true, Ordering::Relaxed);
-                                                                        if let Some(mut editor_ui) = editor.try_lock() {
-                                                                            editor_ui.fit_to_curve(&curve);
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                            current_display_scope_ptr
-                                                                .store(selected_scope, Ordering::Relaxed);
-                                                        }
-                                                    });
-
-                                                    ui.add_space(12.0);
-                                                    ui.label("dBFS Ticks");
-                                                    ui.add_space(6.0);
-
-                                                    let mut strict_dbfs_ticks =
-                                                        current_strict_dbfs_ticks_ptr.load(Ordering::Relaxed);
-                                                    if ui
-                                                        .checkbox(
-                                                            &mut strict_dbfs_ticks,
-                                                            "Use experimental dB spacing",
+                                                    let tab_button = |ui: &mut egui::Ui, label: &str, selected: bool| {
+                                                        let fill = if selected { tab_active } else { tab_idle };
+                                                        let text = if selected {
+                                                            Color32::from_hex("#1c1917").unwrap()
+                                                        } else {
+                                                            Color32::from_hex("#FFEAD0").unwrap()
+                                                        };
+                                                        ui.add_sized(
+                                                            [132.0, 30.0],
+                                                            egui::Button::new(RichText::new(label).color(text))
+                                                                .fill(fill)
+                                                                .stroke(egui::Stroke::new(1.0, Color32::TRANSPARENT)),
                                                         )
-                                                        .changed()
-                                                    {
-                                                        current_strict_dbfs_ticks_ptr
-                                                            .store(strict_dbfs_ticks, Ordering::Relaxed);
-                                                    }
+                                                    };
 
-                                                    ui.add_space(12.0);
-                                                    ui.label("Grid Step");
-                                                    ui.add_space(6.0);
+                                                    egui::Frame::new()
+                                                        .fill(frame_fill)
+                                                        .corner_radius(CornerRadiusF32::same(10.0))
+                                                        .stroke(egui::Stroke::new(1.0, border_color))
+                                                        .inner_margin(14.0)
+                                                        .show(ui, |ui| {
+                                                            ui.horizontal(|ui| {
+                                                                ui.heading("Settings");
+                                                                ui.with_layout(
+                                                                    egui::Layout::right_to_left(egui::Align::Center),
+                                                                    |ui| {
+                                                                        ui.scope(|ui| {
+                                                                            let visuals = ui.visuals_mut();
+                                                                            sout_ui::make_ghost_button_visuals(visuals);
 
-                                                    let grid_step_enabled = current_display_mode_ptr
-                                                        .load(Ordering::Relaxed)
-                                                        == DISPLAY_MODE_LINEAR;
-                                                    let mut grid_step_x =
-                                                        current_grid_step_x_ptr.load(Ordering::Relaxed) as f32 / 1000.0;
-                                                    let mut grid_step_y =
-                                                        current_grid_step_y_ptr.load(Ordering::Relaxed) as f32 / 1000.0;
+                                                                            let response = ui.add_sized(
+                                                                                [24.0, 24.0],
+                                                                                egui::Button::new(
+                                                                                    RichText::new(" ")
+                                                                                        .size(14.0)
+                                                                                        .color(Color32::TRANSPARENT),
+                                                                                ),
+                                                                            );
 
-                                                    ui.add_enabled_ui(grid_step_enabled, |ui| {
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Horizontal");
-                                                            if ui
-                                                                .add(
-                                                                    egui::DragValue::new(&mut grid_step_x)
-                                                                        .speed(0.01)
-                                                                        .range(0.01..=1.0)
-                                                                        .fixed_decimals(3),
-                                                                )
-                                                                .changed()
-                                                            {
-                                                                let stored = (grid_step_x.clamp(0.01, 1.0) * 1000.0)
-                                                                    .round()
-                                                                    as usize;
-                                                                current_grid_step_x_ptr
-                                                                    .store(stored.max(1), Ordering::Relaxed);
-                                                            }
-                                                        });
+                                                                            ui.painter().text(
+                                                                                response.rect.center(),
+                                                                                egui::Align2::CENTER_CENTER,
+                                                                                "󰅖",
+                                                                                egui::FontId::proportional(14.0),
+                                                                                Color32::from_hex("#FFEAD0").unwrap(),
+                                                                            );
 
-                                                        ui.horizontal(|ui| {
-                                                            ui.label("Vertical");
-                                                            if ui
-                                                                .add(
-                                                                    egui::DragValue::new(&mut grid_step_y)
-                                                                        .speed(0.01)
-                                                                        .range(0.01..=1.0)
-                                                                        .fixed_decimals(3),
-                                                                )
-                                                                .changed()
-                                                            {
-                                                                let stored = (grid_step_y.clamp(0.01, 1.0) * 1000.0)
-                                                                    .round()
-                                                                    as usize;
-                                                                current_grid_step_y_ptr
-                                                                    .store(stored.max(1), Ordering::Relaxed);
-                                                            }
-                                                        });
-                                                    });
-
-                                                    if !grid_step_enabled {
-                                                        ui.label("Only active in Linear display mode.");
-                                                    }
-
-                                                    ui.add_space(12.0);
-                                                    ui.label("Oversampling");
-                                                    ui.add_space(6.0);
-
-                                                    ui.scope(|ui| {
-                                                        let visuals = ui.visuals_mut();
-                                                        sout_ui::make_combobox_visuals(
-                                                            visuals,
-                                                            Color32::from_hex("#554e4a").unwrap(),
-                                                        );
-                                                        ui.style_mut().spacing.interact_size.y = 24.0;
-
-                                                        let current_algo = current_oversampling_algorithm_ptr
-                                                            .load(Ordering::Relaxed);
-                                                        let mut selected_algo = current_algo;
-
-                                                        egui::ComboBox::from_id_salt("settings_oversampling_algorithm_selector")
-                                                            .width(220.0)
-                                                            .selected_text(oversampling_algorithm_label(current_algo))
-                                                            .show_ui(ui, |ui| {
-                                                                ui.selectable_value(
-                                                                    &mut selected_algo,
-                                                                    OVERSAMPLING_ALGORITHM_LANCZOS3,
-                                                                    "Lanczos3",
-                                                                );
-                                                                ui.selectable_value(
-                                                                    &mut selected_algo,
-                                                                    OVERSAMPLING_ALGORITHM_FLAT_FIR,
-                                                                    "Flat FIR",
+                                                                            if response.clicked() {
+                                                                                open_settings_modal_ptr
+                                                                                    .store(false, Ordering::Relaxed);
+                                                                            }
+                                                                        });
+                                                                    },
                                                                 );
                                                             });
 
-                                                        if selected_algo != current_algo {
-                                                            current_oversampling_algorithm_ptr
-                                                                .store(selected_algo, Ordering::Relaxed);
-                                                        }
-                                                    });
+                                                            ui.add_space(10.0);
+                                                            ui.painter().line_segment(
+                                                                [ui.min_rect().left_bottom(), ui.min_rect().right_bottom()],
+                                                                egui::Stroke::new(
+                                                                    1.0,
+                                                                    Color32::from_hex("#FFEAD0")
+                                                                        .unwrap()
+                                                                        .gamma_multiply(0.15),
+                                                                ),
+                                                            );
+                                                            ui.add_space(10.0);
 
-                                                    ui.add_space(6.0);
+                                                            ui.horizontal_top(|ui| {
+                                                                egui::Frame::new()
+                                                                    .fill(panel_fill)
+                                                                    .corner_radius(CornerRadiusF32::same(8.0))
+                                                                    .stroke(egui::Stroke::new(1.0, border_color))
+                                                                    .inner_margin(10.0)
+                                                                    .show(ui, |ui| {
+                                                                        ui.set_width(135.0);
+                                                                        ui.set_max_width(152.0);
+                                                                        ui.vertical(|ui| {
+                                                                            if tab_button(
+                                                                                ui,
+                                                                                "Chart View",
+                                                                                current_settings_tab == 0,
+                                                                            )
+                                                                            .clicked()
+                                                                            {
+                                                                                current_settings_tab = 0;
+                                                                            }
+                                                                            ui.add_space(6.0);
+                                                                            if tab_button(
+                                                                                ui,
+                                                                                "Waveform View",
+                                                                                current_settings_tab == 1,
+                                                                            )
+                                                                            .clicked()
+                                                                            {
+                                                                                current_settings_tab = 1;
+                                                                            }
+                                                                            ui.add_space(6.0);
+                                                                            if tab_button(
+                                                                                ui,
+                                                                                "Audio",
+                                                                                current_settings_tab == 2,
+                                                                            )
+                                                                            .clicked()
+                                                                            {
+                                                                                current_settings_tab = 2;
+                                                                            }
+                                                                        });
+                                                                    });
 
-                                                    egui::Sides::new().show(
-                                                        ui,
-                                                        |_ui| {},
-                                                        |ui| {
-                                                            if ui.button("Close").clicked() {
-                                                                open_settings_modal_ptr.store(false, Ordering::Relaxed);
-                                                            }
-                                                        },
-                                                    );
+                                                                ui.add_space(12.0);
+
+                                                                egui::Frame::new()
+                                                                    .fill(panel_fill)
+                                                                    .corner_radius(CornerRadiusF32::same(8.0))
+                                                                    .stroke(egui::Stroke::new(1.0, border_color))
+                                                                    .inner_margin(12.0)
+                                                                    .show(ui, |ui| {
+                                                                        ui.set_width(380.0);
+                                                                        ui.set_max_width(410.0);
+                                                                        ui.set_min_height(320.0);
+                                                                        ui.vertical(|ui| {
+                                                                            match current_settings_tab {
+                                                                                0 => {
+                                                                                    section_label(ui, "Scale");
+
+                                                                                    ui.scope(|ui| {
+                                                                                        let visuals = ui.visuals_mut();
+                                                                                        sout_ui::make_combobox_visuals(
+                                                                                            visuals,
+                                                                                        Color32::from_hex("#554e4a")
+                                                                                            .unwrap(),
+                                                                                    );
+                                                                                    ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                                                    let current_mode = current_display_mode_ptr
+                                                                                        .load(Ordering::Relaxed);
+                                                                                    let mut selected_mode = current_mode;
+
+                                                                                    egui::ComboBox::from_id_salt(
+                                                                                        "settings_display_mode_selector",
+                                                                                    )
+                                                                                    .width(220.0)
+                                                                                    .selected_text(display_mode_label(
+                                                                                        current_mode,
+                                                                                    ))
+                                                                                    .show_ui(ui, |ui| {
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_mode,
+                                                                                            DISPLAY_MODE_LINEAR,
+                                                                                            "Linear",
+                                                                                        );
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_mode,
+                                                                                            DISPLAY_MODE_DBFS,
+                                                                                            "dBFS",
+                                                                                        );
+                                                                                    });
+
+                                                                                    if selected_mode != current_mode {
+                                                                                        current_display_mode_ptr.store(
+                                                                                            selected_mode,
+                                                                                            Ordering::Relaxed,
+                                                                                        );
+                                                                                    }
+                                                                                    });
+
+                                                                                    ui.add_space(12.0);
+                                                                                    section_label(ui, "dBFS Scope");
+
+                                                                                    ui.scope(|ui| {
+                                                                                        let visuals = ui.visuals_mut();
+                                                                                        sout_ui::make_combobox_visuals(
+                                                                                            visuals,
+                                                                                        Color32::from_hex("#554e4a")
+                                                                                            .unwrap(),
+                                                                                    );
+                                                                                    ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                                                    let current_scope = current_display_scope_ptr
+                                                                                        .load(Ordering::Relaxed);
+                                                                                    let mut selected_scope = current_scope;
+                                                                                    let current_display_mode =
+                                                                                        current_display_mode_ptr
+                                                                                            .load(Ordering::Relaxed);
+
+                                                                                    egui::ComboBox::from_id_salt(
+                                                                                        "settings_display_scope_selector",
+                                                                                    )
+                                                                                    .width(220.0)
+                                                                                    .selected_text(display_scope_label(
+                                                                                        current_scope,
+                                                                                    ))
+                                                                                    .show_ui(ui, |ui| {
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_scope,
+                                                                                            DISPLAY_SCOPE_Y_ONLY,
+                                                                                            "Y only",
+                                                                                        );
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_scope,
+                                                                                            DISPLAY_SCOPE_XY,
+                                                                                            "X+Y",
+                                                                                        );
+                                                                                    });
+
+                                                                                    if selected_scope != current_scope {
+                                                                                        if current_display_mode
+                                                                                            == DISPLAY_MODE_DBFS
+                                                                                            && selected_scope
+                                                                                                == DISPLAY_SCOPE_Y_ONLY
+                                                                                        {
+                                                                                            let current_symmetry_mode =
+                                                                                                symmetry_mode_ptr
+                                                                                                    .load(Ordering::Relaxed);
+                                                                                            if let Some(mut curve) =
+                                                                                                lookup_curve.try_lock()
+                                                                                            {
+                                                                                                if is_default_linear_curve(
+                                                                                                    &curve,
+                                                                                                    current_symmetry_mode,
+                                                                                                ) {
+                                                                                                    *curve =
+                                                                                                        build_default_dbfs_curve(
+                                                                                                            current_symmetry_mode,
+                                                                                                        );
+                                                                                                    curve_dirty.store(
+                                                                                                        true,
+                                                                                                        Ordering::Relaxed,
+                                                                                                    );
+                                                                                                    plot_dirty_ptr.store(
+                                                                                                        true,
+                                                                                                        Ordering::Relaxed,
+                                                                                                    );
+                                                                                                    if let Some(
+                                                                                                        mut editor_ui,
+                                                                                                    ) = editor.try_lock()
+                                                                                                    {
+                                                                                                        editor_ui.fit_to_curve(
+                                                                                                            &curve,
+                                                                                                        );
+                                                                                                    }
+                                                                                                }
+                                                                                            }
+                                                                                        }
+                                                                                        current_display_scope_ptr.store(
+                                                                                            selected_scope,
+                                                                                            Ordering::Relaxed,
+                                                                                        );
+                                                                                    }
+                                                                                    });
+
+                                                                                    ui.add_space(12.0);
+                                                                                    section_label(ui, "Grid");
+
+                                                                                let mut strict_dbfs_ticks =
+                                                                                    current_strict_dbfs_ticks_ptr
+                                                                                        .load(Ordering::Relaxed);
+                                                                                if ui
+                                                                                    .checkbox(
+                                                                                        &mut strict_dbfs_ticks,
+                                                                                        "Use experimental dB spacing",
+                                                                                    )
+                                                                                    .changed()
+                                                                                {
+                                                                                    current_strict_dbfs_ticks_ptr.store(
+                                                                                        strict_dbfs_ticks,
+                                                                                        Ordering::Relaxed,
+                                                                                    );
+                                                                                }
+
+                                                                                ui.add_space(8.0);
+
+                                                                                let grid_step_enabled =
+                                                                                    current_display_mode_ptr
+                                                                                        .load(Ordering::Relaxed)
+                                                                                        == DISPLAY_MODE_LINEAR;
+                                                                                let mut grid_step_x =
+                                                                                    current_grid_step_x_ptr
+                                                                                        .load(Ordering::Relaxed)
+                                                                                        as f32
+                                                                                        / 1000.0;
+                                                                                let mut grid_step_y =
+                                                                                    current_grid_step_y_ptr
+                                                                                        .load(Ordering::Relaxed)
+                                                                                        as f32
+                                                                                        / 1000.0;
+
+                                                                                    ui.add_enabled_ui(grid_step_enabled, |ui| {
+                                                                                        ui.horizontal(|ui| {
+                                                                                            ui.label("Horizontal");
+                                                                                            if ui
+                                                                                            .add(
+                                                                                                egui::DragValue::new(
+                                                                                                    &mut grid_step_x,
+                                                                                                )
+                                                                                                .speed(0.01)
+                                                                                                .range(0.01..=1.0)
+                                                                                                .fixed_decimals(3),
+                                                                                            )
+                                                                                            .changed()
+                                                                                        {
+                                                                                            let stored = (grid_step_x
+                                                                                                .clamp(0.01, 1.0)
+                                                                                                * 1000.0)
+                                                                                                .round()
+                                                                                                as usize;
+                                                                                            current_grid_step_x_ptr.store(
+                                                                                                stored.max(1),
+                                                                                                Ordering::Relaxed,
+                                                                                            );
+                                                                                        }
+                                                                                    });
+
+                                                                                    ui.horizontal(|ui| {
+                                                                                        ui.label("Vertical");
+                                                                                        if ui
+                                                                                            .add(
+                                                                                                egui::DragValue::new(
+                                                                                                    &mut grid_step_y,
+                                                                                                )
+                                                                                                .speed(0.01)
+                                                                                                .range(0.01..=1.0)
+                                                                                                .fixed_decimals(3),
+                                                                                            )
+                                                                                            .changed()
+                                                                                        {
+                                                                                            let stored = (grid_step_y
+                                                                                                .clamp(0.01, 1.0)
+                                                                                                * 1000.0)
+                                                                                                .round()
+                                                                                                as usize;
+                                                                                            current_grid_step_y_ptr.store(
+                                                                                                stored.max(1),
+                                                                                                Ordering::Relaxed,
+                                                                                            );
+                                                                                        }
+                                                                                    });
+                                                                                    });
+
+                                                                                    if !grid_step_enabled {
+                                                                                        ui.label(
+                                                                                            "Only active in Linear display mode.",
+                                                                                        );
+                                                                                    }
+                                                                                }
+                                                                                1 => {
+                                                                                    section_label(ui, "Timebase");
+
+                                                                                    ui.scope(|ui| {
+                                                                                        let visuals = ui.visuals_mut();
+                                                                                        sout_ui::make_combobox_visuals(
+                                                                                            visuals,
+                                                                                        Color32::from_hex("#554e4a")
+                                                                                            .unwrap(),
+                                                                                    );
+                                                                                    ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                                                    let current_val = current_timebase_ptr
+                                                                                        .load(Ordering::Relaxed);
+                                                                                    let mut selected_val = current_val;
+
+                                                                                    egui::ComboBox::from_id_salt(
+                                                                                        "settings_timebase_selector",
+                                                                                    )
+                                                                                    .width(220.0)
+                                                                                    .selected_text(format!(
+                                                                                        "{}",
+                                                                                        current_val
+                                                                                    ))
+                                                                                    .show_ui(ui, |ui| {
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_val,
+                                                                                            128,
+                                                                                            "128",
+                                                                                        );
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_val,
+                                                                                            256,
+                                                                                            "256",
+                                                                                        );
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_val,
+                                                                                            512,
+                                                                                            "512",
+                                                                                        );
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_val,
+                                                                                            1024,
+                                                                                            "1024",
+                                                                                        );
+
+                                                                                        ui.separator();
+                                                                                        ui.horizontal(|ui| {
+                                                                                            ui.label("Custom:");
+                                                                                            ui.add(
+                                                                                                egui::DragValue::new(
+                                                                                                    &mut selected_val,
+                                                                                                )
+                                                                                                .clamp_existing_to_range(
+                                                                                                    true,
+                                                                                                )
+                                                                                                .range(64..=4096),
+                                                                                            );
+                                                                                        });
+                                                                                    });
+
+                                                                                    if selected_val != current_val {
+                                                                                        current_timebase_ptr.store(
+                                                                                            selected_val,
+                                                                                            Ordering::Relaxed,
+                                                                                        );
+                                                                                    }
+                                                                                    });
+
+                                                                                    // ui.add_space(12.0);
+                                                                                    // section_label(ui, "Preview");
+                                                                                    // ui.label(
+                                                                                    //     "Waveform preview behavior and density live here.",
+                                                                                    // );
+                                                                                }
+                                                                                _ => {
+                                                                                    section_label(ui, "Interpolation");
+
+                                                                                    ui.scope(|ui| {
+                                                                                        let visuals = ui.visuals_mut();
+                                                                                        sout_ui::make_combobox_visuals(
+                                                                                            visuals,
+                                                                                        Color32::from_hex("#554e4a")
+                                                                                            .unwrap(),
+                                                                                    );
+                                                                                    ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                                                    let current_mode =
+                                                                                        current_interpolation_mode_ptr
+                                                                                            .load(Ordering::Relaxed);
+                                                                                    let mut selected_mode = current_mode;
+
+                                                                                    egui::ComboBox::from_id_salt(
+                                                                                        "settings_interpolation_selector",
+                                                                                    )
+                                                                                    .width(220.0)
+                                                                                    .selected_text(
+                                                                                        interpolation_mode_label(
+                                                                                            current_mode,
+                                                                                        ),
+                                                                                    )
+                                                                                    .show_ui(ui, |ui| {
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_mode,
+                                                                                            INTERPOLATION_MODE_LINEAR,
+                                                                                            "Linear",
+                                                                                        );
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_mode,
+                                                                                            INTERPOLATION_MODE_COSINE,
+                                                                                            "Cosine",
+                                                                                        );
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_mode,
+                                                                                            INTERPOLATION_MODE_HERMITE,
+                                                                                            "Hermite",
+                                                                                        );
+                                                                                    });
+
+                                                                                    if selected_mode != current_mode {
+                                                                                        current_interpolation_mode_ptr.store(
+                                                                                            selected_mode,
+                                                                                            Ordering::Relaxed,
+                                                                                        );
+                                                                                    }
+                                                                                    });
+
+                                                                                    ui.add_space(12.0);
+                                                                                    section_label(ui, "Oversampling");
+
+                                                                                    ui.scope(|ui| {
+                                                                                        let visuals = ui.visuals_mut();
+                                                                                        sout_ui::make_combobox_visuals(
+                                                                                            visuals,
+                                                                                        Color32::from_hex("#554e4a")
+                                                                                            .unwrap(),
+                                                                                    );
+                                                                                    ui.style_mut().spacing.interact_size.y = 24.0;
+
+                                                                                    let current_algo =
+                                                                                        current_oversampling_algorithm_ptr
+                                                                                            .load(Ordering::Relaxed);
+                                                                                    let mut selected_algo = current_algo;
+
+                                                                                    egui::ComboBox::from_id_salt(
+                                                                                        "settings_oversampling_algorithm_selector",
+                                                                                    )
+                                                                                    .width(220.0)
+                                                                                    .selected_text(
+                                                                                        oversampling_algorithm_label(
+                                                                                            current_algo,
+                                                                                        ),
+                                                                                    )
+                                                                                    .show_ui(ui, |ui| {
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_algo,
+                                                                                            OVERSAMPLING_ALGORITHM_LANCZOS3,
+                                                                                            "Lanczos3",
+                                                                                        );
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_algo,
+                                                                                            OVERSAMPLING_ALGORITHM_FLAT_FIR,
+                                                                                            "Flat FIR",
+                                                                                        );
+                                                                                    });
+
+                                                                                    if selected_algo != current_algo {
+                                                                                        current_oversampling_algorithm_ptr.store(
+                                                                                            selected_algo,
+                                                                                            Ordering::Relaxed,
+                                                                                        );
+                                                                                    }
+                                                                                    });
+                                                                                }
+                                                                            }
+                                                                        });
+                                                                    });
+                                                            });
+                                                        });
+
+                                                    settings_tab_ptr
+                                                        .store(current_settings_tab, Ordering::Relaxed);
                                                 });
 
                                                 if modal.should_close() {

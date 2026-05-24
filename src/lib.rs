@@ -203,6 +203,7 @@ impl Default for WaverPlugin {
                 open_msg_modal: Arc::new(AtomicBool::new(false)),
                 open_about_modal: Arc::new(AtomicBool::new(false)),
                 open_settings_modal: Arc::new(AtomicBool::new(false)),
+                settings_tab: Arc::new(AtomicUsize::new(0)),
                 help_panel_title: Arc::new(Mutex::new(String::from("SA Waver"))),
                 help_panel_text: Arc::new(Mutex::new(String::from("by sout audio"))),
                 saving_preset_name: Arc::new(Mutex::new(String::new())),
