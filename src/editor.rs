@@ -79,7 +79,6 @@ pub struct EditorData {
 
 #[derive(Default)]
 struct EditorVisualCache {
-    fonts_loaded: bool,
     background: Option<TextureHandle>,
     save_icon: Option<TextureHandle>,
 }
@@ -138,15 +137,23 @@ impl EditorData {
         let saving_preset_name_ptr = self.saving_preset_name.clone();
         let msg_modal_title_ptr = self.msg_modal_title.clone();
         let msg_modal_content_ptr = self.msg_modal_content.clone();
-        let visual_cache = Arc::new(Mutex::new(EditorVisualCache::default()));
-
         create_egui_editor(
             params.editor_state.clone(),
-            (),
-            |_, _| {},
-            move |ctx, setter, _state| {
-                let theme = SoutTheme::new();
-                sout_ui::set_theme(ctx, theme);
+            EditorVisualCache::default(),
+            |ctx, state| {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "maple-mono".to_string(),
+                    std::sync::Arc::new(egui::FontData::from_static(
+                        include_bytes!("../assets/MapleMono-NF-CN-Regular.ttf"),
+                    )),
+                );
+                fonts
+                    .families
+                    .get_mut(&egui::FontFamily::Proportional)
+                    .unwrap()
+                    .insert(0, "maple-mono".to_string());
+                ctx.set_fonts(fonts);
 
                 let load_image = |name: &str, image: &[u8]| -> TextureHandle {
                     let image = load_image_from_memory(image);
@@ -160,36 +167,20 @@ impl EditorData {
                     ctx.load_texture(name, image, Default::default())
                 };
 
-                let (bg_texture, save_texture) = {
-                    let mut cache = visual_cache.lock();
-                    if !cache.fonts_loaded {
-                        let mut fonts = egui::FontDefinitions::default();
-                        fonts.font_data.insert(
-                            "maple-mono".to_string(),
-                            std::sync::Arc::new(egui::FontData::from_static(
-                                include_bytes!("../assets/MapleMono-NF-CN-Regular.ttf"),
-                            )),
-                        );
-                        fonts
-                            .families
-                            .get_mut(&egui::FontFamily::Proportional)
-                            .unwrap()
-                            .insert(0, "maple-mono".to_string());
-                        ctx.set_fonts(fonts);
-                        cache.fonts_loaded = true;
-                    }
-
-                    let bg_texture = cache
-                        .background
-                        .get_or_insert_with(|| load_image("background", include_bytes!("../assets/bg.png")))
-                        .clone();
-                    let save_texture = cache
-                        .save_icon
-                        .get_or_insert_with(|| load_image("save", include_bytes!("../assets/save.png")))
-                        .clone();
-
-                    (bg_texture, save_texture)
-                };
+                state.background = Some(load_image("background", include_bytes!("../assets/bg.png")));
+                state.save_icon = Some(load_image("save", include_bytes!("../assets/save.png")));
+            },
+            move |ctx, setter, state| {
+                let theme = SoutTheme::new();
+                sout_ui::set_theme(ctx, theme);
+                let bg_texture = state
+                    .background
+                    .clone()
+                    .unwrap_or_else(|| ctx.load_texture("background_fallback", ColorImage::example(), Default::default()));
+                let save_texture = state
+                    .save_icon
+                    .clone()
+                    .unwrap_or_else(|| ctx.load_texture("save_fallback", ColorImage::example(), Default::default()));
 
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(egui::Color32::BLACK).inner_margin(0.0))
@@ -1034,17 +1025,29 @@ impl EditorData {
                                                         preset_display_name(&current_preset_guard)
                                                     };
 
-                                                    let preset_menu_height = (ui.ctx().screen_rect().height() * 0.85).max(480.0_f32);
+                                                    let preset_menu_height = 10_000.0_f32;
                                                     let button_min_width = ui.spacing().combo_width;
                                                     let preset_button = egui::Button::new(
                                                         RichText::new(format!("{preset_label}  ▾")).color(Color32::from_hex("#FFEAD0").unwrap()),
                                                     )
                                                     .min_size(egui::vec2(button_min_width, ui.spacing().interact_size.y));
+                                                    let preset_popup_id = ui.make_persistent_id("preset_selector");
+                                                    let is_preset_menu_open = ui.memory(|mem| mem.is_popup_open(preset_popup_id));
+                                                    if !is_preset_menu_open {
+                                                        let presets = fs::get_presets().unwrap_or_default();
+                                                        *presets_ptr.lock() = presets;
+                                                    }
                                                     let response = egui::menu::menu_custom_button(ui, preset_button, |ui| {
+                                                        ui.spacing_mut().interact_size.y = 18.0;
+                                                        ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
+                                                        ui.spacing_mut().item_spacing.y = 1.0;
                                                         ui.set_min_width(button_min_width);
                                                         egui::ScrollArea::vertical()
                                                             .max_height(preset_menu_height)
                                                             .show(ui, |ui| {
+                                                                ui.spacing_mut().interact_size.y = 18.0;
+                                                                ui.spacing_mut().button_padding = egui::vec2(8.0, 2.0);
+                                                                ui.spacing_mut().item_spacing.y = 1.0;
                                                                 ui.set_min_width(button_min_width);
 
                                                                 if ui
@@ -1150,10 +1153,6 @@ impl EditorData {
                                                         }
                                                     }
 
-                                                    if response.clicked() {
-                                                        let presets = fs::get_presets().unwrap_or_default();
-                                                        *presets_ptr.lock() = presets;
-                                                    }
                                                 }
                                             })
                                         });
