@@ -411,36 +411,76 @@ impl EditorData {
 
                                             if open_about_modal_ptr.load(Ordering::Relaxed) {
                                                 let modal = Modal::new(Id::new("About Modal")).show(ui.ctx(), |ui| {
-                                                    ui.set_width(320.0);
+                                                    ui.set_width(420.0);
+                                                    ui.set_min_width(420.0);
 
-                                                    ui.heading("SA Waver");
-                                                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                                                    ui.add_space(8.0);
-
-                                                    ui.scope(|ui| {
-                                                        let visuals = ui.visuals_mut();
-                                                        sout_ui::make_btn_visuals(
-                                                            visuals,
-                                                            Color32::from_hex("#554e4a").unwrap(),
-                                                            Color32::from_hex("#6a625d").unwrap(),
-                                                            Color32::from_hex("#FFEAD0").unwrap(),
+                                                    ui.vertical(|ui| {
+                                                        ui.heading("SA Waver");
+                                                        ui.label(
+                                                            RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
+                                                                .weak(),
                                                         );
-                                                        ui.style_mut().spacing.button_padding = egui::vec2(10.0, 6.0);
+                                                        ui.add_space(12.0);
 
-                                                        if ui.button("󰖟 Homepage").clicked() {
-                                                            ui.ctx().open_url(egui::OpenUrl::new_tab(
-                                                                "https://audio.soout.top/sa_waver",
-                                                            ));
-                                                        }
+                                                        ui.label(RichText::new("Links").strong());
+                                                        ui.add_space(4.0);
+                                                        ui.hyperlink_to("󰖟 Homepage", "https://audio.soout.top/sa_waver");
+                                                        ui.hyperlink_to(" GitHub", "https://github.com/sout233/sa_waver");
 
-                                                        if ui.button(" GitHub").clicked() {
-                                                            ui.ctx().open_url(egui::OpenUrl::new_tab(
-                                                                "https://github.com/sout233/sa_waver",
-                                                            ));
-                                                        }
+                                                        ui.add_space(12.0);
+                                                        ui.separator();
+                                                        ui.add_space(8.0);
+
+                                                        ui.label(RichText::new("Author").strong());
+                                                        ui.add_space(4.0);
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.label("sout");
+                                                            ui.label("-");
+                                                            ui.hyperlink_to("github.com/sout233", "https://github.com/sout233");
+                                                        });
+
+                                                        ui.add_space(10.0);
+                                                        ui.label(RichText::new("Special Thanks").strong());
+                                                        ui.add_space(4.0);
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.label("NullTech_EndBlue");
+                                                            ui.label("-");
+                                                            ui.hyperlink_to(
+                                                                "space.bilibili.com/487390529",
+                                                                "https://space.bilibili.com/487390529",
+                                                            );
+                                                        });
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.label("UnD3ath");
+                                                            ui.label("-");
+                                                            ui.hyperlink_to(
+                                                                "space.bilibili.com/224632474",
+                                                                "https://space.bilibili.com/224632474",
+                                                            );
+                                                        });
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.label("RHYX");
+                                                            ui.label("-");
+                                                            ui.hyperlink_to(
+                                                                "space.bilibili.com/256700038",
+                                                                "https://space.bilibili.com/256700038",
+                                                            );
+                                                        });
+
+                                                        ui.add_space(10.0);
+                                                        ui.label(RichText::new("Thanks").strong());
+                                                        ui.add_space(4.0);
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.label("Aqua Sounds");
+                                                            ui.label("-");
+                                                            ui.hyperlink_to(
+                                                                "www.aqua-sounds.top",
+                                                                "https://www.aqua-sounds.top/",
+                                                            );
+                                                        });
                                                     });
 
-                                                    ui.add_space(8.0);
+                                                    ui.add_space(10.0);
 
                                                     egui::Sides::new().show(
                                                         ui,
