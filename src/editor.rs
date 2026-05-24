@@ -1513,9 +1513,9 @@ fn rolling_oscilloscope(
 
         let map_y = |val: f32| -> f32 {
             let t = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
-                ((val.clamp(-1.0, 1.0) + 1.0) * 0.5).clamp(0.0, 1.0)
+                (val + 1.0) * 0.5
             } else {
-                val.clamp(0.0, 1.0)
+                val
             };
             egui::lerp(bottom_y..=top_y, t)
         };
