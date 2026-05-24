@@ -75,6 +75,8 @@ impl EditorData {
         current_display_mode: Arc<AtomicUsize>,
         current_display_scope: Arc<AtomicUsize>,
         current_strict_dbfs_ticks: Arc<AtomicBool>,
+        current_grid_step_x: Arc<AtomicUsize>,
+        current_grid_step_y: Arc<AtomicUsize>,
     ) -> Option<Box<dyn Editor>> {
         let lookup_curve = self.lookup_curve.clone();
         let curve_dirty = self.curve_dirty.clone();
@@ -96,6 +98,8 @@ impl EditorData {
         let current_display_mode_ptr = current_display_mode.clone();
         let current_display_scope_ptr = current_display_scope.clone();
         let current_strict_dbfs_ticks_ptr = current_strict_dbfs_ticks.clone();
+        let current_grid_step_x_ptr = current_grid_step_x.clone();
+        let current_grid_step_y_ptr = current_grid_step_y.clone();
         let open_save_modal_ptr = self.open_save_modal.clone();
         let open_msg_modal_ptr = self.open_msg_modal.clone();
         let open_about_modal_ptr = self.open_about_modal.clone();
@@ -629,6 +633,62 @@ impl EditorData {
                                                     }
 
                                                     ui.add_space(12.0);
+                                                    ui.label("Grid Step");
+                                                    ui.add_space(6.0);
+
+                                                    let grid_step_enabled = current_display_mode_ptr
+                                                        .load(Ordering::Relaxed)
+                                                        == DISPLAY_MODE_LINEAR;
+                                                    let mut grid_step_x =
+                                                        current_grid_step_x_ptr.load(Ordering::Relaxed) as f32 / 1000.0;
+                                                    let mut grid_step_y =
+                                                        current_grid_step_y_ptr.load(Ordering::Relaxed) as f32 / 1000.0;
+
+                                                    ui.add_enabled_ui(grid_step_enabled, |ui| {
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Horizontal");
+                                                            if ui
+                                                                .add(
+                                                                    egui::DragValue::new(&mut grid_step_x)
+                                                                        .speed(0.01)
+                                                                        .range(0.01..=1.0)
+                                                                        .fixed_decimals(3),
+                                                                )
+                                                                .changed()
+                                                            {
+                                                                let stored = (grid_step_x.clamp(0.01, 1.0) * 1000.0)
+                                                                    .round()
+                                                                    as usize;
+                                                                current_grid_step_x_ptr
+                                                                    .store(stored.max(1), Ordering::Relaxed);
+                                                            }
+                                                        });
+
+                                                        ui.horizontal(|ui| {
+                                                            ui.label("Vertical");
+                                                            if ui
+                                                                .add(
+                                                                    egui::DragValue::new(&mut grid_step_y)
+                                                                        .speed(0.01)
+                                                                        .range(0.01..=1.0)
+                                                                        .fixed_decimals(3),
+                                                                )
+                                                                .changed()
+                                                            {
+                                                                let stored = (grid_step_y.clamp(0.01, 1.0) * 1000.0)
+                                                                    .round()
+                                                                    as usize;
+                                                                current_grid_step_y_ptr
+                                                                    .store(stored.max(1), Ordering::Relaxed);
+                                                            }
+                                                        });
+                                                    });
+
+                                                    if !grid_step_enabled {
+                                                        ui.label("Only active in Linear display mode.");
+                                                    }
+
+                                                    ui.add_space(12.0);
                                                     ui.label("Oversampling");
                                                     ui.add_space(6.0);
 
@@ -847,6 +907,15 @@ impl EditorData {
                                                 && current_display_scope == DISPLAY_SCOPE_XY,
                                             strict_dbfs_view,
                                         );
+                                        if current_display_mode == DISPLAY_MODE_LINEAR {
+                                            editor_ui.grid_step_x =
+                                                current_grid_step_x_ptr.load(Ordering::Relaxed) as f32 / 1000.0;
+                                            editor_ui.grid_step_y =
+                                                current_grid_step_y_ptr.load(Ordering::Relaxed) as f32 / 1000.0;
+                                        } else {
+                                            editor_ui.grid_step_x = 0.1;
+                                            editor_ui.grid_step_y = 0.1;
+                                        }
 
                                         // curve editor
                                         egui::Frame::new()

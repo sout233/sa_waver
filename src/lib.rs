@@ -67,6 +67,8 @@ pub struct WaverPlugin {
     pub current_display_mode: Arc<AtomicUsize>,
     pub current_display_scope: Arc<AtomicUsize>,
     pub current_strict_dbfs_ticks: Arc<AtomicBool>,
+    pub current_grid_step_x: Arc<AtomicUsize>,
+    pub current_grid_step_y: Arc<AtomicUsize>,
     pub oversampling_times: Arc<AtomicF32>,
     pub oversamplers: Vec<ConfigurableOversampler>,
     pub reported_oversampling_factor: usize,
@@ -120,6 +122,12 @@ struct WaverPluginParams {
 
     #[persist = "strict_dbfs_ticks"]
     pub current_strict_dbfs_ticks: Arc<AtomicBool>,
+
+    #[persist = "grid_step_x_milli"]
+    pub current_grid_step_x: Arc<AtomicUsize>,
+
+    #[persist = "grid_step_y_milli"]
+    pub current_grid_step_y: Arc<AtomicUsize>,
 
     #[persist = "current_preset"]
     pub current_preset: Arc<Mutex<String>>,
@@ -211,6 +219,8 @@ impl Default for WaverPlugin {
             current_display_mode: params.current_display_mode.clone(),
             current_display_scope: params.current_display_scope.clone(),
             current_strict_dbfs_ticks: params.current_strict_dbfs_ticks.clone(),
+            current_grid_step_x: params.current_grid_step_x.clone(),
+            current_grid_step_y: params.current_grid_step_y.clone(),
             oversampling_times: Arc::new(AtomicF32::new(oversampling_factor_to_times(
                 DEFAULT_OVERSAMPLING_FACTOR,
             ) as f32)),
@@ -245,6 +255,8 @@ impl Default for WaverPluginParams {
             current_display_mode: Arc::new(AtomicUsize::new(DEFAULT_DISPLAY_MODE)),
             current_display_scope: Arc::new(AtomicUsize::new(DEFAULT_DISPLAY_SCOPE)),
             current_strict_dbfs_ticks: Arc::new(AtomicBool::new(false)),
+            current_grid_step_x: Arc::new(AtomicUsize::new(100)),
+            current_grid_step_y: Arc::new(AtomicUsize::new(100)),
             current_preset: Arc::new(Mutex::new(String::from("./Default.ron"))),
             saved_plot_state: Arc::new(Mutex::new(PlotStateSnapshot {
                 curve: lookup_curve.clone(),
@@ -488,6 +500,8 @@ impl Plugin for WaverPlugin {
             self.current_display_mode.clone(),
             self.current_display_scope.clone(),
             self.current_strict_dbfs_ticks.clone(),
+            self.current_grid_step_x.clone(),
+            self.current_grid_step_y.clone(),
         )
     }
 }
