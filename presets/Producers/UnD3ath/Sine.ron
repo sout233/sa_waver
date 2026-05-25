@@ -1,5 +1,6 @@
 (
-  knots: [
+  curve: (
+    knots: [
     (
       position: (0.0, 0.0),
       interpolation: Cubic,
@@ -70,5 +71,7 @@
         weight: None,
       ),
     ),
-  ],
+    ],
+  ),
+  symmetry_mode: 1,
 )
