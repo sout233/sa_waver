@@ -9,7 +9,7 @@ use bevy_math::Vec2 as BevyVec2;
 use nih_plug::{
     editor::Editor,
     nih_error,
-    prelude::AtomicF32,
+    prelude::{AtomicF32, Param},
 };
 use nih_plug_egui::{
     create_egui_editor,
@@ -25,9 +25,11 @@ use crate::{
     oversampling::{OVERSAMPLING_ALGORITHM_FLAT_FIR, OVERSAMPLING_ALGORITHM_LANCZOS3},
     param_knob::ParamKnob,
     sout_ui::{self, SoutTheme},
+    AutomationSlotBinding, AUTOMATION_SLOT_COUNT, AUTOMATION_TARGET_NONE, AUTOMATION_TARGET_X, AUTOMATION_TARGET_Y,
     DEFAULT_SYMMETRY_MODE, WaverPluginParams, INTERPOLATION_MODE_COSINE, INTERPOLATION_MODE_HERMITE,
     INTERPOLATION_MODE_LINEAR, SYMMETRY_MODE_ASYMMETRIC, SYMMETRY_MODE_SYMMETRIC,
     DISPLAY_MODE_DBFS, DISPLAY_MODE_LINEAR, DISPLAY_SCOPE_XY, DISPLAY_SCOPE_Y_ONLY,
+    automation_binding_knot_index, knot_position_to_automation_value,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,6 +77,14 @@ pub struct EditorData {
     pub help_panel_text: Arc<Mutex<String>>,
     pub msg_modal_title: Arc<Mutex<String>>,
     pub msg_modal_content: Arc<Mutex<String>>,
+    pub automation_slot_bindings: Arc<Mutex<[AutomationSlotBinding; AUTOMATION_SLOT_COUNT]>>,
+}
+
+#[derive(Clone, Copy)]
+enum AutomationBindAction {
+    Off,
+    X,
+    Y,
 }
 
 #[derive(Default)]
@@ -124,6 +134,7 @@ impl EditorData {
         let current_strict_dbfs_ticks_ptr = current_strict_dbfs_ticks.clone();
         let current_grid_step_x_ptr = current_grid_step_x.clone();
         let current_grid_step_y_ptr = current_grid_step_y.clone();
+        let automation_slot_bindings_ptr = self.automation_slot_bindings.clone();
         let open_save_modal_ptr = self.open_save_modal.clone();
         let open_msg_modal_ptr = self.open_msg_modal.clone();
         let open_about_modal_ptr = self.open_about_modal.clone();
@@ -628,6 +639,16 @@ impl EditorData {
                                                                             {
                                                                                 current_settings_tab = 2;
                                                                             }
+                                                                            ui.add_space(6.0);
+                                                                            if tab_button(
+                                                                                ui,
+                                                                                "Automation",
+                                                                                current_settings_tab == 3,
+                                                                            )
+                                                                            .clicked()
+                                                                            {
+                                                                                current_settings_tab = 3;
+                                                                            }
                                                                         });
                                                                     });
 
@@ -747,6 +768,12 @@ impl EditorData {
                                                                                                         build_default_dbfs_curve(
                                                                                                             current_symmetry_mode,
                                                                                                         );
+                                                                                                    sync_automation_slot_params_from_curve(
+                                                                                                        setter,
+                                                                                                        &params,
+                                                                                                        &curve,
+                                                                                                        current_symmetry_mode,
+                                                                                                    );
                                                                                                     curve_dirty.store(
                                                                                                         true,
                                                                                                         Ordering::Relaxed,
@@ -942,7 +969,7 @@ impl EditorData {
                                                                                     //     "Waveform preview behavior and density live here.",
                                                                                     // );
                                                                                 }
-                                                                                _ => {
+                                                                                2 => {
                                                                                     section_label(ui, "Interpolation");
 
                                                                                     ui.scope(|ui| {
@@ -1040,6 +1067,190 @@ impl EditorData {
                                                                                         );
                                                                                     }
                                                                                     });
+                                                                                }
+                                                                                _ => {
+                                                                                    section_label(ui, "Matrix");
+                                                                                    ui.label(
+                                                                                        RichText::new(
+                                                                                            "Bind host automation slots to knot X or Y coordinates.",
+                                                                                        )
+                                                                                        .size(12.0)
+                                                                                        .color(
+                                                                                            Color32::from_hex("#FFEAD0")
+                                                                                                .unwrap()
+                                                                                                .gamma_multiply(0.8),
+                                                                                        ),
+                                                                                    );
+                                                                                    ui.add_space(10.0);
+
+                                                                                    let symmetry_mode_value =
+                                                                                        symmetry_mode_ptr.load(Ordering::Relaxed);
+
+                                                                                    if let Some(mut bindings) =
+                                                                                        automation_slot_bindings_ptr.try_lock()
+                                                                                    {
+                                                                                        let knot_count = lookup_curve
+                                                                                            .try_lock()
+                                                                                            .map(|curve| curve.knots().len())
+                                                                                            .unwrap_or(0);
+
+                                                                                        for slot_index in 0..AUTOMATION_SLOT_COUNT {
+                                                                                            ui.horizontal(|ui| {
+                                                                                                ui.set_height(26.0);
+                                                                                                ui.label(
+                                                                                                    RichText::new(format!(
+                                                                                                        "Slot {}",
+                                                                                                        slot_index + 1
+                                                                                                    ))
+                                                                                                    .size(12.5),
+                                                                                                );
+                                                                                                ui.add_space(8.0);
+
+                                                                                                ui.scope(|ui| {
+                                                                                                    let visuals =
+                                                                                                        ui.visuals_mut();
+                                                                                                    sout_ui::make_combobox_visuals(
+                                                                                                        visuals,
+                                                                                                        Color32::from_hex("#554e4a")
+                                                                                                            .unwrap(),
+                                                                                                    );
+                                                                                                    ui.style_mut().spacing.interact_size.y =
+                                                                                                        24.0;
+
+                                                                                                    let previous_binding = bindings[slot_index];
+                                                                                                    let mut target = bindings[slot_index].target;
+                                                                                                    egui::ComboBox::from_id_salt((
+                                                                                                        "automation_target",
+                                                                                                        slot_index,
+                                                                                                    ))
+                                                                                                    .width(92.0)
+                                                                                                    .selected_text(
+                                                                                                        automation_target_label(target),
+                                                                                                    )
+                                                                                                    .show_ui(ui, |ui| {
+                                                                                                        ui.selectable_value(
+                                                                                                            &mut target,
+                                                                                                            AUTOMATION_TARGET_NONE,
+                                                                                                            "Off",
+                                                                                                        );
+                                                                                                        ui.selectable_value(
+                                                                                                            &mut target,
+                                                                                                            AUTOMATION_TARGET_X,
+                                                                                                            "X",
+                                                                                                        );
+                                                                                                        ui.selectable_value(
+                                                                                                            &mut target,
+                                                                                                            AUTOMATION_TARGET_Y,
+                                                                                                            "Y",
+                                                                                                        );
+                                                                                                    });
+                                                                                                    bindings[slot_index].target = target;
+
+                                                                                                    if bindings[slot_index] != previous_binding {
+                                                                                                        if let Some(curve) = lookup_curve.try_lock() {
+                                                                                                            sync_single_automation_slot_param_from_curve(
+                                                                                                                setter,
+                                                                                                                &params,
+                                                                                                                &curve,
+                                                                                                                symmetry_mode_value,
+                                                                                                                slot_index,
+                                                                                                            );
+                                                                                                        }
+                                                                                                    }
+                                                                                                });
+
+                                                                                                ui.add_space(8.0);
+
+                                                                                                ui.scope(|ui| {
+                                                                                                    let visuals =
+                                                                                                        ui.visuals_mut();
+                                                                                                    sout_ui::make_combobox_visuals(
+                                                                                                        visuals,
+                                                                                                        Color32::from_hex("#554e4a")
+                                                                                                            .unwrap(),
+                                                                                                    );
+                                                                                                    ui.style_mut().spacing.interact_size.y =
+                                                                                                        24.0;
+
+                                                                                                    let previous_binding = bindings[slot_index];
+                                                                                                    let current_index =
+                                                                                                        lookup_curve
+                                                                                                            .try_lock()
+                                                                                                            .and_then(|curve| {
+                                                                                                                automation_binding_knot_index(
+                                                                                                                    &curve,
+                                                                                                                    &bindings[slot_index],
+                                                                                                                )
+                                                                                                            })
+                                                                                                            .unwrap_or(0);
+                                                                                                    let mut knot_index = current_index.min(
+                                                                                                        knot_count.saturating_sub(1),
+                                                                                                    );
+                                                                                                    egui::ComboBox::from_id_salt((
+                                                                                                        "automation_knot",
+                                                                                                        slot_index,
+                                                                                                    ))
+                                                                                                    .width(140.0)
+                                                                                                    .selected_text(
+                                                                                                        automation_knot_label(
+                                                                                                            knot_count,
+                                                                                                            knot_index,
+                                                                                                            symmetry_mode_value,
+                                                                                                        ),
+                                                                                                    )
+                                                                                                    .show_ui(ui, |ui| {
+                                                                                                        if knot_count == 0 {
+                                                                                                            ui.label("No knots");
+                                                                                                        } else {
+                                                                                                            for knot_idx in 0..knot_count {
+                                                                                                                ui.selectable_value(
+                                                                                                                    &mut knot_index,
+                                                                                                                    knot_idx,
+                                                                                                                    automation_knot_label(
+                                                                                                                        knot_count,
+                                                                                                                        knot_idx,
+                                                                                                                        symmetry_mode_value,
+                                                                                                                    ),
+                                                                                                                );
+                                                                                                            }
+                                                                                                        }
+                                                                                                    });
+                                                                                                    if let Some(curve) = lookup_curve.try_lock() {
+                                                                                                        if let Some(knot) = curve.knots().get(knot_index) {
+                                                                                                            bindings[slot_index].knot_id = knot.id;
+                                                                                                            bindings[slot_index].legacy_knot_index = knot_index;
+                                                                                                        }
+                                                                                                    }
+
+                                                                                                    if bindings[slot_index] != previous_binding {
+                                                                                                        if let Some(curve) = lookup_curve.try_lock() {
+                                                                                                            sync_single_automation_slot_param_from_curve(
+                                                                                                                setter,
+                                                                                                                &params,
+                                                                                                                &curve,
+                                                                                                                symmetry_mode_value,
+                                                                                                                slot_index,
+                                                                                                            );
+                                                                                                        }
+                                                                                                    }
+                                                                                                });
+                                                                                            });
+                                                                                            ui.add_space(6.0);
+                                                                                        }
+
+                                                                                        ui.add_space(6.0);
+                                                                                        ui.label(
+                                                                                            RichText::new(
+                                                                                                "Tip: automate Slot 1..8 in your DAW, then route each slot here.",
+                                                                                            )
+                                                                                            .size(11.5)
+                                                                                            .color(
+                                                                                                Color32::from_hex("#FFEAD0")
+                                                                                                    .unwrap()
+                                                                                                    .gamma_multiply(0.7),
+                                                                                            ),
+                                                                                        );
+                                                                                    }
                                                                                 }
                                                                             }
                                                                         });
@@ -1174,6 +1385,12 @@ impl EditorData {
                                                                         snapshot.symmetry_mode,
                                                                         Ordering::Relaxed,
                                                                     );
+                                                                    sync_automation_slot_params_from_curve(
+                                                                        setter,
+                                                                        &params,
+                                                                        &curve,
+                                                                        snapshot.symmetry_mode,
+                                                                    );
                                                                     curve_dirty.store(true, Ordering::Relaxed);
                                                                     *params.saved_plot_state.lock() = snapshot;
                                                                     if let Some(mut editor_ui) = editor.try_lock() {
@@ -1188,6 +1405,12 @@ impl EditorData {
                                                                     symmetry_mode_ptr.store(
                                                                         DEFAULT_SYMMETRY_MODE,
                                                                         Ordering::Relaxed,
+                                                                    );
+                                                                    sync_automation_slot_params_from_curve(
+                                                                        setter,
+                                                                        &params,
+                                                                        &curve,
+                                                                        DEFAULT_SYMMETRY_MODE,
                                                                     );
                                                                     curve_dirty.store(true, Ordering::Relaxed);
                                                                     *params.saved_plot_state.lock() = capture_plot_state(
@@ -1224,6 +1447,7 @@ impl EditorData {
                             let mut top_y = 0.0;
                             let mut bottom_y = 0.0;
                             let mut plot_has_focus = false;
+                            let mut pending_automation_bind: Option<(usize, usize, AutomationBindAction)> = None;
                             let mut selected_knot_count = 0usize;
                             let mut selected_knot_ids_for_generator: Vec<usize> = Vec::new();
                             let mut selected_generator = match segment_generator_kind_ptr.load(Ordering::Relaxed) {
@@ -1247,6 +1471,37 @@ impl EditorData {
                             egui::Frame::new().inner_margin(12.0).show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     if let (Some(mut curve), Some(mut editor_ui)) = (lookup_curve.try_lock(), editor.try_lock()) {
+                                        let pending_automation_bind_ptr = std::sync::Arc::new(std::sync::Mutex::new(None));
+                                        {
+                                            let pending_automation_bind_menu = pending_automation_bind_ptr.clone();
+                                            editor_ui.context_menu_extension = Some(Box::new(move |ui, knot| {
+                                                ui.menu_button("Automation", |ui| {
+                                                    for slot_index in 0..AUTOMATION_SLOT_COUNT {
+                                                        ui.menu_button(format!("Slot {}", slot_index + 1), |ui| {
+                                                            if ui.button("Bind X").clicked() {
+                                                                if let Ok(mut pending) = pending_automation_bind_menu.lock() {
+                                                                    *pending = Some((slot_index, knot.id, AutomationBindAction::X));
+                                                                }
+                                                                ui.close_menu();
+                                                            }
+                                                            if ui.button("Bind Y").clicked() {
+                                                                if let Ok(mut pending) = pending_automation_bind_menu.lock() {
+                                                                    *pending = Some((slot_index, knot.id, AutomationBindAction::Y));
+                                                                }
+                                                                ui.close_menu();
+                                                            }
+                                                            if ui.button("Off").clicked() {
+                                                                if let Ok(mut pending) = pending_automation_bind_menu.lock() {
+                                                                    *pending = Some((slot_index, knot.id, AutomationBindAction::Off));
+                                                                }
+                                                                ui.close_menu();
+                                                            }
+                                                        });
+                                                    }
+                                                });
+                                            }));
+                                        }
+
                                         let side_length = ui.available_height().max(350.0);
                                         let square_size = egui::Vec2::splat(side_length);
                                         let editor_domain_min = if current_symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
@@ -1315,11 +1570,53 @@ impl EditorData {
                                                         if editor_ui.ui(ui, &mut curve, sample_for_editor) {
                                                             curve_dirty.store(true, Ordering::Relaxed);
                                                             plot_dirty_ptr.store(true, Ordering::Relaxed);
+                                                            sync_automation_slot_params_from_curve(
+                                                                setter,
+                                                                &params,
+                                                                &curve,
+                                                                current_symmetry_mode,
+                                                            );
+                                                        }
+
+                                                        if let Ok(mut pending) = pending_automation_bind_ptr.lock() {
+                                                            pending_automation_bind = pending.take();
                                                         }
                                                         plot_has_focus = editor_ui.has_focus;
                                                         selected_knot_count = editor_ui.selected_knot_ids.len();
                                                         selected_knot_ids_for_generator =
                                                             editor_ui.selected_knot_ids.iter().copied().collect();
+
+                                                        if let Some((slot_index, knot_id, action)) = pending_automation_bind {
+                                                            if let Some(mut bindings) =
+                                                                automation_slot_bindings_ptr.try_lock()
+                                                            {
+                                                                match action {
+                                                                    AutomationBindAction::Off => {
+                                                                        bindings[slot_index].knot_id = 0;
+                                                                        bindings[slot_index].legacy_knot_index = 0;
+                                                                        bindings[slot_index].target = AUTOMATION_TARGET_NONE;
+                                                                    }
+                                                                    AutomationBindAction::X => {
+                                                                        bindings[slot_index].knot_id = knot_id;
+                                                                        bindings[slot_index].legacy_knot_index = 0;
+                                                                        bindings[slot_index].target = AUTOMATION_TARGET_X;
+                                                                    }
+                                                                    AutomationBindAction::Y => {
+                                                                        bindings[slot_index].knot_id = knot_id;
+                                                                        bindings[slot_index].legacy_knot_index = 0;
+                                                                        bindings[slot_index].target = AUTOMATION_TARGET_Y;
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            sync_single_automation_slot_param_from_curve(
+                                                                setter,
+                                                                &params,
+                                                                &curve,
+                                                                current_symmetry_mode,
+                                                                slot_index,
+                                                            );
+                                                        }
 
                                                         let curve_to_screen =
                                                             |curve_x: f32, curve_y: f32| -> Pos2 {
@@ -1573,6 +1870,12 @@ impl EditorData {
                                                                                 ) {
                                                                                     curve_dirty.store(true, Ordering::Relaxed);
                                                                                     plot_dirty_ptr.store(true, Ordering::Relaxed);
+                                                                                    sync_automation_slot_params_from_curve(
+                                                                                        setter,
+                                                                                        &params,
+                                                                                        &curve,
+                                                                                        current_symmetry_mode,
+                                                                                    );
                                                                                     if let Some(mut editor_ui) = editor.try_lock() {
                                                                                         editor_ui.fit_to_curve(&curve);
                                                                                     }
@@ -1866,14 +2169,20 @@ impl EditorData {
                                                                         hovered_help_text = Some("Switch between mirrored shaping and independent negative shaping.");
                                                                     }
 
-                                                                    if selected_val != current_val {
-                                                                        if let Some(mut curve) = lookup_curve.try_lock() {
-                                                                            *curve =
-                                                                                transform_curve_for_symmetry_mode(&curve, selected_val);
-                                                                            if let Some(mut editor_ui) = editor.try_lock() {
-                                                                                editor_ui.fit_to_curve(&curve);
-                                                                            }
-                                                                            curve_dirty.store(true, Ordering::Relaxed);
+                                                                        if selected_val != current_val {
+                                                                            if let Some(mut curve) = lookup_curve.try_lock() {
+                                                                                *curve =
+                                                                                    transform_curve_for_symmetry_mode(&curve, selected_val);
+                                                                                sync_automation_slot_params_from_curve(
+                                                                                    setter,
+                                                                                    &params,
+                                                                                    &curve,
+                                                                                    selected_val,
+                                                                                );
+                                                                                if let Some(mut editor_ui) = editor.try_lock() {
+                                                                                    editor_ui.fit_to_curve(&curve);
+                                                                                }
+                                                                                curve_dirty.store(true, Ordering::Relaxed);
                                                                         }
                                                                         symmetry_mode_ptr.store(selected_val, Ordering::Relaxed);
                                                                         plot_dirty_ptr.store(true, Ordering::Relaxed);
@@ -2278,10 +2587,84 @@ fn display_scope_label(mode: usize) -> &'static str {
     }
 }
 
+fn automation_target_label(target: usize) -> &'static str {
+    match target {
+        AUTOMATION_TARGET_X => "X",
+        AUTOMATION_TARGET_Y => "Y",
+        _ => "Off",
+    }
+}
+
+fn automation_knot_label(knot_count: usize, knot_index: usize, symmetry_mode: usize) -> String {
+    if knot_count == 0 {
+        return "No knots".to_string();
+    }
+
+    if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+        format!("Knot {}", knot_index + 1)
+    } else {
+        format!("Point {}", knot_index + 1)
+    }
+}
+
 fn symmetry_mode_label(mode: usize) -> &'static str {
     match mode {
         SYMMETRY_MODE_ASYMMETRIC => "Asymmetric",
         _ => "Symmetric",
+    }
+}
+
+fn sync_automation_slot_params_from_curve(
+    setter: &nih_plug::prelude::ParamSetter,
+    params: &WaverPluginParams,
+    curve: &LookupCurve,
+    symmetry_mode: usize,
+) {
+    for slot_index in 0..AUTOMATION_SLOT_COUNT {
+        sync_single_automation_slot_param_from_curve(setter, params, curve, symmetry_mode, slot_index);
+    }
+}
+
+fn sync_single_automation_slot_param_from_curve(
+    setter: &nih_plug::prelude::ParamSetter,
+    params: &WaverPluginParams,
+    curve: &LookupCurve,
+    symmetry_mode: usize,
+    slot_index: usize,
+) {
+    let Some(bindings) = params.automation_slot_bindings.try_lock() else {
+        return;
+    };
+    let binding = bindings[slot_index];
+    drop(bindings);
+
+    if binding.target == AUTOMATION_TARGET_NONE {
+        return;
+    }
+
+    let Some(knot_index) = automation_binding_knot_index(curve, &binding) else {
+        return;
+    };
+
+    let knot = curve.knots()[knot_index];
+    let value = knot_position_to_automation_value(knot.position, binding.target, symmetry_mode);
+
+    let param = match slot_index {
+        0 => &params.automation_slot_1,
+        1 => &params.automation_slot_2,
+        2 => &params.automation_slot_3,
+        3 => &params.automation_slot_4,
+        4 => &params.automation_slot_5,
+        5 => &params.automation_slot_6,
+        6 => &params.automation_slot_7,
+        _ => &params.automation_slot_8,
+    };
+
+    let current = param.unmodulated_plain_value();
+    if current.to_bits() != value.to_bits() {
+        setter.begin_set_parameter(param);
+        setter.set_parameter(param, value);
+        setter.end_set_parameter(param);
     }
 }
 

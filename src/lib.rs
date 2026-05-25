@@ -37,6 +37,30 @@ pub const DEFAULT_DISPLAY_MODE: usize = DISPLAY_MODE_LINEAR;
 pub const DISPLAY_SCOPE_Y_ONLY: usize = 0;
 pub const DISPLAY_SCOPE_XY: usize = 1;
 pub const DEFAULT_DISPLAY_SCOPE: usize = DISPLAY_SCOPE_XY;
+pub const AUTOMATION_SLOT_COUNT: usize = 8;
+pub const AUTOMATION_TARGET_NONE: usize = 0;
+pub const AUTOMATION_TARGET_X: usize = 1;
+pub const AUTOMATION_TARGET_Y: usize = 2;
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutomationSlotBinding {
+    #[serde(default)]
+    pub knot_id: usize,
+    #[serde(default, alias = "knot_index", skip_serializing)]
+    pub legacy_knot_index: usize,
+    #[serde(default)]
+    pub target: usize,
+}
+
+impl Default for AutomationSlotBinding {
+    fn default() -> Self {
+        Self {
+            knot_id: 0,
+            legacy_knot_index: 0,
+            target: AUTOMATION_TARGET_NONE,
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PlotStateSnapshot {
@@ -79,6 +103,7 @@ pub struct WaverPlugin {
     pub current_chunk_peak: f32,
     pub input_peak_follower: f32,
     pub latest_input: Arc<AtomicF32>,
+    pub last_applied_automation_values: [f32; AUTOMATION_SLOT_COUNT],
 }
 
 #[derive(Params)]
@@ -137,6 +162,9 @@ struct WaverPluginParams {
 
     #[persist = "plot_dirty"]
     pub plot_dirty: Arc<AtomicBool>,
+
+    #[persist = "automation_slot_bindings"]
+    pub automation_slot_bindings: Arc<Mutex<[AutomationSlotBinding; AUTOMATION_SLOT_COUNT]>>,
     pub oversampling_times: Arc<AtomicF32>,
 
     /// The parameter's ID is used to identify the parameter in the wrappred plugin API. As long as
@@ -151,6 +179,23 @@ struct WaverPluginParams {
 
     #[id = "mix"]
     pub mix: FloatParam,
+
+    #[id = "automation_slot_1"]
+    pub automation_slot_1: FloatParam,
+    #[id = "automation_slot_2"]
+    pub automation_slot_2: FloatParam,
+    #[id = "automation_slot_3"]
+    pub automation_slot_3: FloatParam,
+    #[id = "automation_slot_4"]
+    pub automation_slot_4: FloatParam,
+    #[id = "automation_slot_5"]
+    pub automation_slot_5: FloatParam,
+    #[id = "automation_slot_6"]
+    pub automation_slot_6: FloatParam,
+    #[id = "automation_slot_7"]
+    pub automation_slot_7: FloatParam,
+    #[id = "automation_slot_8"]
+    pub automation_slot_8: FloatParam,
 }
 
 impl Default for WaverPlugin {
@@ -213,6 +258,7 @@ impl Default for WaverPlugin {
                 saving_preset_name: Arc::new(Mutex::new(String::new())),
                 msg_modal_title: Arc::new(Mutex::new(String::new())),
                 msg_modal_content: Arc::new(Mutex::new(String::new())),
+                automation_slot_bindings: params.automation_slot_bindings.clone(),
             },
             current_resolution: params.current_resolution.clone(),
             current_timebase: params.current_timebase.clone(),
@@ -236,6 +282,7 @@ impl Default for WaverPlugin {
             current_chunk_peak: 0.0,
             input_peak_follower: 0.0,
             latest_input: Arc::new(AtomicF32::new(0.5)),
+            last_applied_automation_values: current_automation_slot_values(&params),
         }
     }
 }
@@ -268,6 +315,9 @@ impl Default for WaverPluginParams {
                 symmetry_mode: DEFAULT_SYMMETRY_MODE,
             })),
             plot_dirty: Arc::new(AtomicBool::new(false)),
+            automation_slot_bindings: Arc::new(Mutex::new(
+                [AutomationSlotBinding::default(); AUTOMATION_SLOT_COUNT],
+            )),
             oversampling_times: oversampling_times.clone(),
 
             pre_gain: FloatParam::new(
@@ -312,6 +362,15 @@ impl Default for WaverPluginParams {
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(1))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
+
+            automation_slot_1: automation_slot_param("Automation 1"),
+            automation_slot_2: automation_slot_param("Automation 2"),
+            automation_slot_3: automation_slot_param("Automation 3"),
+            automation_slot_4: automation_slot_param("Automation 4"),
+            automation_slot_5: automation_slot_param("Automation 5"),
+            automation_slot_6: automation_slot_param("Automation 6"),
+            automation_slot_7: automation_slot_param("Automation 7"),
+            automation_slot_8: automation_slot_param("Automation 8"),
         }
     }
 }
@@ -421,6 +480,8 @@ impl Plugin for WaverPlugin {
             }
         }
 
+        self.sync_automation_slots_to_curve();
+
         sync_lut_cache_from_state(
             &self.params.lookup_curve,
             &self.editor_data.curve_dirty,
@@ -519,6 +580,167 @@ impl WaverPlugin {
         self.oversamplers = (0..num_channels)
             .map(|_| ConfigurableOversampler::new(maximum_block_size, MAX_OVERSAMPLING_FACTOR, algorithm))
             .collect();
+    }
+
+    fn sync_automation_slots_to_curve(&mut self) {
+        let current_values = current_automation_slot_values(&self.params);
+        let changed = current_values
+            .iter()
+            .zip(self.last_applied_automation_values.iter())
+            .any(|(left, right)| left.to_bits() != right.to_bits());
+
+        if !changed {
+            return;
+        }
+
+        if let Some(mut curve) = self.params.lookup_curve.try_lock() {
+            let mut bindings = self
+                .params
+                .automation_slot_bindings
+                .try_lock()
+                .map(|bindings| *bindings)
+                .unwrap_or([AutomationSlotBinding::default(); AUTOMATION_SLOT_COUNT]);
+            if apply_automation_slots_to_curve(
+                &mut curve,
+                &mut bindings,
+                &current_values,
+                self.symmetry_mode.load(Ordering::Relaxed),
+            ) {
+                self.editor_data.curve_dirty.store(true, Ordering::Relaxed);
+                self.params.plot_dirty.store(true, Ordering::Relaxed);
+            }
+            if let Some(mut stored_bindings) = self.params.automation_slot_bindings.try_lock() {
+                *stored_bindings = bindings;
+            }
+            self.last_applied_automation_values = current_values;
+        }
+    }
+}
+
+fn automation_slot_param(name: &str) -> FloatParam {
+    FloatParam::new(name, 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+        .with_smoother(SmoothingStyle::Linear(0.0))
+        .with_unit("")
+        .with_value_to_string(Arc::new(|value| format!("{:.3}", value)))
+        .with_string_to_value(Arc::new(|string| string.trim().parse::<f32>().ok()))
+}
+
+pub(crate) fn current_automation_slot_values(params: &WaverPluginParams) -> [f32; AUTOMATION_SLOT_COUNT] {
+    [
+        params.automation_slot_1.modulated_plain_value(),
+        params.automation_slot_2.modulated_plain_value(),
+        params.automation_slot_3.modulated_plain_value(),
+        params.automation_slot_4.modulated_plain_value(),
+        params.automation_slot_5.modulated_plain_value(),
+        params.automation_slot_6.modulated_plain_value(),
+        params.automation_slot_7.modulated_plain_value(),
+        params.automation_slot_8.modulated_plain_value(),
+    ]
+}
+
+pub fn apply_automation_slots_to_curve(
+    curve: &mut LookupCurve,
+    bindings: &mut [AutomationSlotBinding; AUTOMATION_SLOT_COUNT],
+    values: &[f32; AUTOMATION_SLOT_COUNT],
+    symmetry_mode: usize,
+) -> bool {
+    let mut changed = false;
+
+    for slot_index in 0..AUTOMATION_SLOT_COUNT {
+        let binding = bindings[slot_index];
+        if binding.target == AUTOMATION_TARGET_NONE {
+            continue;
+        }
+
+        let Some(knot_index) = automation_binding_knot_index(curve, &binding) else {
+            continue;
+        };
+
+        let original = curve.knots()[knot_index];
+        let mut new_position = original.position;
+        match binding.target {
+            AUTOMATION_TARGET_X => {
+                let min_x = curve
+                    .prev_knot(knot_index)
+                    .map(|knot| knot.position.x + f32::EPSILON)
+                    .unwrap_or(if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC { -1.0 } else { 0.0 });
+                let max_x = curve
+                    .next_knot(knot_index)
+                    .map(|knot| knot.position.x - f32::EPSILON)
+                    .unwrap_or(1.0);
+                let value = values[slot_index];
+                let remapped = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                    value * 2.0 - 1.0
+                } else {
+                    value
+                };
+                new_position.x = remapped.clamp(min_x, max_x);
+            }
+            AUTOMATION_TARGET_Y => {
+                let min_y = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC { -1.0 } else { 0.0 };
+                new_position.y = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                    (values[slot_index] * 2.0 - 1.0).clamp(min_y, 1.0)
+                } else {
+                    values[slot_index].clamp(min_y, 1.0)
+                };
+            }
+            _ => {}
+        }
+
+        if new_position.x.to_bits() != original.position.x.to_bits()
+            || new_position.y.to_bits() != original.position.y.to_bits()
+        {
+            curve.modify_knot(
+                knot_index,
+                bevy_lookup_curve::Knot {
+                    position: new_position,
+                    ..original
+                },
+            );
+            changed = true;
+        }
+        bindings[slot_index].knot_id = original.id;
+        bindings[slot_index].legacy_knot_index = knot_index;
+    }
+
+    changed
+}
+
+pub fn automation_binding_knot_index(curve: &LookupCurve, binding: &AutomationSlotBinding) -> Option<usize> {
+    if binding.knot_id != 0 {
+        curve.knots().iter().position(|knot| knot.id == binding.knot_id)
+    } else if binding.legacy_knot_index < curve.knots().len() {
+        Some(binding.legacy_knot_index)
+    } else {
+        None
+    }
+}
+
+pub fn knot_position_to_automation_value(position: Vec2, target: usize, symmetry_mode: usize) -> f32 {
+    match target {
+        AUTOMATION_TARGET_X => {
+            if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                ((position.x + 1.0) * 0.5).clamp(0.0, 1.0)
+            } else {
+                position.x.clamp(0.0, 1.0)
+            }
+        }
+        AUTOMATION_TARGET_Y => {
+            if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+                ((position.y + 1.0) * 0.5).clamp(0.0, 1.0)
+            } else {
+                position.y.clamp(0.0, 1.0)
+            }
+        }
+        _ => 0.5,
+    }
+}
+
+pub fn infer_symmetry_mode_from_curve(curve: &LookupCurve) -> usize {
+    if curve.knots().iter().any(|knot| knot.position.x < 0.0 || knot.position.y < 0.0) {
+        SYMMETRY_MODE_ASYMMETRIC
+    } else {
+        SYMMETRY_MODE_SYMMETRIC
     }
 }
 
