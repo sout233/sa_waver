@@ -38,10 +38,18 @@ const LANCZOS3_DOWNSAMPLING_KERNEL: [f32; 11] = [
 
 const FLAT_FIR_KERNEL_LEN: usize = 95;
 const FLAT_FIR_KAISER_BETA: f32 = 5.65;
+const FINAL_DOWNSAMPLING_KERNEL_LEN: usize = 255;
+const FINAL_DOWNSAMPLING_CUTOFF: f32 = 0.47;
+const FINAL_DOWNSAMPLING_KAISER_BETA: f32 = 8.6;
 
 static FLAT_FIR_UPSAMPLING_KERNEL: LazyLock<[f32; FLAT_FIR_KERNEL_LEN]> = LazyLock::new(design_flat_fir_upsampling_kernel);
+#[cfg(test)]
 static FLAT_FIR_DOWNSAMPLING_KERNEL: LazyLock<[f32; FLAT_FIR_KERNEL_LEN]> =
     LazyLock::new(|| std::array::from_fn(|index| FLAT_FIR_UPSAMPLING_KERNEL[index] * 0.5));
+static FINAL_FLAT_FIR_UPSAMPLING_KERNEL: LazyLock<[f32; FINAL_DOWNSAMPLING_KERNEL_LEN]> =
+    LazyLock::new(design_final_flat_fir_upsampling_kernel);
+static FINAL_FLAT_FIR_DOWNSAMPLING_KERNEL: LazyLock<[f32; FINAL_DOWNSAMPLING_KERNEL_LEN]> =
+    LazyLock::new(design_final_flat_fir_downsampling_kernel);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OversamplingAlgorithm {
@@ -64,11 +72,19 @@ impl OversamplingAlgorithm {
         }
     }
 
-    fn kernels(self) -> (&'static [f32], &'static [f32]) {
+    fn kernels(self, stage_number: usize) -> (&'static [f32], &'static [f32]) {
         match self {
             Self::Lanczos3 => (&LANCZOS3_UPSAMPLING_KERNEL, &LANCZOS3_DOWNSAMPLING_KERNEL),
-            Self::FlatFir => (FLAT_FIR_UPSAMPLING_KERNEL.as_slice(), FLAT_FIR_DOWNSAMPLING_KERNEL.as_slice()),
+            Self::FlatFir if stage_number == 0 => (
+                FINAL_FLAT_FIR_UPSAMPLING_KERNEL.as_slice(),
+                FINAL_FLAT_FIR_DOWNSAMPLING_KERNEL.as_slice(),
+            ),
+            Self::FlatFir => (FLAT_FIR_UPSAMPLING_KERNEL.as_slice(), FINAL_FLAT_FIR_DOWNSAMPLING_KERNEL.as_slice()),
         }
+    }
+
+    fn preserves_inserted_input_samples(self, stage_number: usize) -> bool {
+        !matches!(self, Self::FlatFir if stage_number == 0)
     }
 }
 
@@ -90,6 +106,7 @@ struct FilterStage {
     downsampling_rb: Vec<f32>,
     downsampling_write_pos: usize,
     scratch_buffer: Vec<f32>,
+    preserves_inserted_input_samples: bool,
 }
 
 impl ConfigurableOversampler {
@@ -192,13 +209,14 @@ impl ConfigurableOversampler {
 impl FilterStage {
     fn new(maximum_block_size: usize, stage_number: usize, algorithm: OversamplingAlgorithm) -> Self {
         let oversampling_amount = 2usize.pow(stage_number as u32 + 1);
-        let (upsampling_kernel, downsampling_kernel) = algorithm.kernels();
+        let (upsampling_kernel, downsampling_kernel) = algorithm.kernels(stage_number);
 
-        assert!(upsampling_kernel.len() == downsampling_kernel.len());
         assert!(upsampling_kernel.len() % 2 == 1);
+        assert!(downsampling_kernel.len() % 2 == 1);
 
-        let kernel_latency = upsampling_kernel.len() / 2;
-        let uncompensated_stage_latency = kernel_latency + kernel_latency;
+        let upsampling_kernel_latency = upsampling_kernel.len() / 2;
+        let downsampling_kernel_latency = downsampling_kernel.len() / 2;
+        let uncompensated_stage_latency = upsampling_kernel_latency + downsampling_kernel_latency;
         let additional_delay_required = (-(uncompensated_stage_latency as isize)).rem_euclid(oversampling_amount as isize) as usize;
 
         Self {
@@ -211,6 +229,7 @@ impl FilterStage {
             downsampling_rb: vec![0.0; downsampling_kernel.len()],
             downsampling_write_pos: 0,
             scratch_buffer: vec![0.0; maximum_block_size * oversampling_amount],
+            preserves_inserted_input_samples: algorithm.preserves_inserted_input_samples(stage_number),
         }
     }
 
@@ -222,8 +241,7 @@ impl FilterStage {
     }
 
     fn effective_latency(&self) -> u32 {
-        let kernel_latency = self.upsampling_kernel.len() / 2;
-        let uncompensated_stage_latency = kernel_latency + kernel_latency;
+        let uncompensated_stage_latency = (self.upsampling_kernel.len() / 2) + (self.downsampling_kernel.len() / 2);
         let total_stage_latency = uncompensated_stage_latency + self.additional_upsampling_latency;
         let effective_latency = total_stage_latency as f32 / self.oversampling_amount as f32;
 
@@ -256,17 +274,18 @@ impl FilterStage {
                 direct_read_pos = 0;
             }
 
-            self.scratch_buffer[output_sample_idx] = if output_sample_idx % 2 == (kernel_latency % 2) {
-                nih_debug_assert_eq!(
-                    self.upsampling_rb[(direct_read_pos + self.upsampling_rb.len() - 1) % self.upsampling_rb.len()],
-                    0.0
-                );
-                nih_debug_assert_eq!(self.upsampling_rb[(direct_read_pos + 1) % self.upsampling_rb.len()], 0.0);
+            self.scratch_buffer[output_sample_idx] =
+                if self.preserves_inserted_input_samples && output_sample_idx % 2 == (kernel_latency % 2) {
+                    nih_debug_assert_eq!(
+                        self.upsampling_rb[(direct_read_pos + self.upsampling_rb.len() - 1) % self.upsampling_rb.len()],
+                        0.0
+                    );
+                    nih_debug_assert_eq!(self.upsampling_rb[(direct_read_pos + 1) % self.upsampling_rb.len()], 0.0);
 
-                self.upsampling_rb[direct_read_pos]
-            } else {
-                convolve_rb(&self.upsampling_rb, self.upsampling_kernel, self.upsampling_write_pos)
-            };
+                    self.upsampling_rb[direct_read_pos]
+                } else {
+                    convolve_rb(&self.upsampling_rb, self.upsampling_kernel, self.upsampling_write_pos)
+                };
         }
     }
 
@@ -343,6 +362,43 @@ fn design_flat_fir_upsampling_kernel() -> [f32; FLAT_FIR_KERNEL_LEN] {
     kernel
 }
 
+fn design_final_flat_fir_downsampling_kernel() -> [f32; FINAL_DOWNSAMPLING_KERNEL_LEN] {
+    design_lowpass_kernel::<FINAL_DOWNSAMPLING_KERNEL_LEN>(FINAL_DOWNSAMPLING_CUTOFF, FINAL_DOWNSAMPLING_KAISER_BETA)
+}
+
+fn design_final_flat_fir_upsampling_kernel() -> [f32; FINAL_DOWNSAMPLING_KERNEL_LEN] {
+    let lowpass = design_lowpass_kernel::<FINAL_DOWNSAMPLING_KERNEL_LEN>(FINAL_DOWNSAMPLING_CUTOFF, FINAL_DOWNSAMPLING_KAISER_BETA);
+
+    lowpass.map(|sample| sample * 2.0)
+}
+
+fn design_lowpass_kernel<const LEN: usize>(cutoff: f32, beta: f32) -> [f32; LEN] {
+    let center = LEN / 2;
+    let mut kernel = [0.0; LEN];
+
+    for (index, sample) in kernel.iter_mut().enumerate() {
+        let offset = index as isize - center as isize;
+        let offset = offset as f32;
+        let ideal_lowpass = cutoff * sinc(cutoff * offset);
+        *sample = ideal_lowpass * kaiser_window(index, LEN, beta);
+    }
+
+    let sum: f32 = kernel.iter().sum();
+    for sample in &mut kernel {
+        *sample /= sum;
+    }
+
+    kernel
+}
+
+fn sinc(x: f32) -> f32 {
+    if x.abs() <= f32::EPSILON {
+        1.0
+    } else {
+        (std::f32::consts::PI * x).sin() / (std::f32::consts::PI * x)
+    }
+}
+
 fn kaiser_window(index: usize, len: usize, beta: f32) -> f32 {
     if len <= 1 {
         return 1.0;
@@ -404,6 +460,51 @@ mod tests {
     }
 
     #[test]
+    fn flat_fir_rejects_final_stage_image_and_alias_bands() {
+        let passband = frequency_response_db(FINAL_FLAT_FIR_DOWNSAMPLING_KERNEL.as_slice(), 20_000.0);
+        let downsampling_stopband = frequency_response_db(FINAL_FLAT_FIR_DOWNSAMPLING_KERNEL.as_slice(), 24_000.0);
+        let upsampling_image = frequency_response_db(FINAL_FLAT_FIR_UPSAMPLING_KERNEL.as_slice(), 24_100.0) - 6.020_600_3;
+
+        assert!(passband > -0.3, "20 kHz should remain usable, got {passband:.3} dB");
+        assert!(
+            downsampling_stopband < -70.0,
+            "24 kHz ultrasonic content should be rejected while downsampling, got {downsampling_stopband:.3} dB"
+        );
+        assert!(
+            upsampling_image < -70.0,
+            "20 kHz input image around 24.1 kHz should be rejected before shaping, got {upsampling_image:.3} dB"
+        );
+    }
+
+    #[test]
+    fn flat_fir_clipped_signal_does_not_build_high_frequency_tilt_at_8x() {
+        let input_gain = db_to_gain(10.0);
+        let reference = measured_clipped_fundamental_db(5_000.0, 3, input_gain);
+
+        for frequency in [10_000.0, 15_000.0, 18_000.0, 20_000.0] {
+            let gain = measured_clipped_fundamental_db(frequency, 3, input_gain) - reference;
+            assert!(
+                gain <= 0.75,
+                "10 dB clipped signal should not tilt upward at {frequency} Hz, got {gain:.3} dB"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_fir_2x_20db_clipped_fundamental_stays_flat() {
+        let input_gain = db_to_gain(20.0);
+        let reference = measured_clipped_fundamental_db(5_000.0, 1, input_gain);
+
+        for frequency in [10_000.0, 15_000.0, 18_000.0, 20_000.0] {
+            let gain = measured_clipped_fundamental_db(frequency, 1, input_gain) - reference;
+            assert!(
+                gain <= 0.75,
+                "20 dB clipped 2x signal fundamental should not tilt upward at {frequency} Hz, got {gain:.3} dB"
+            );
+        }
+    }
+
+    #[test]
     fn flat_fir_has_unity_dc_gain() {
         let upsampling_dc: f32 = FLAT_FIR_UPSAMPLING_KERNEL.iter().sum();
         let downsampling_dc: f32 = FLAT_FIR_DOWNSAMPLING_KERNEL.iter().sum();
@@ -426,6 +527,54 @@ mod tests {
 
         let warmup = oversampler.latency(factor) as usize + 512;
         sine_amplitude(&signal[warmup..], radians_per_sample).max(1.0e-12).log10() * 20.0
+    }
+
+    fn measured_clipped_fundamental_db(frequency: f32, factor: usize, input_gain: f32) -> f32 {
+        let measurement_len = 65_536;
+        let samples = measurement_len * 2;
+        let coherent_frequency = coherent_frequency(frequency, measurement_len);
+        let radians_per_sample = std::f32::consts::TAU * coherent_frequency / TEST_SAMPLE_RATE;
+        let mut signal = vec![0.0; samples];
+
+        for (index, sample) in signal.iter_mut().enumerate() {
+            *sample = input_gain * (radians_per_sample * index as f32).sin();
+        }
+
+        let mut oversampler = ConfigurableOversampler::new(samples, factor, OversamplingAlgorithm::FlatFir);
+        oversampler.process(&mut signal, factor, |upsampled| {
+            for sample in upsampled {
+                *sample = sample.clamp(-1.0, 1.0);
+            }
+        });
+
+        let warmup = oversampler.latency(factor) as usize + 512;
+        sine_amplitude(&signal[warmup..warmup + measurement_len], radians_per_sample)
+            .max(1.0e-12)
+            .log10()
+            * 20.0
+    }
+
+    fn coherent_frequency(frequency: f32, len: usize) -> f32 {
+        let bin = (frequency * len as f32 / TEST_SAMPLE_RATE).round().max(1.0);
+        bin * TEST_SAMPLE_RATE / len as f32
+    }
+
+    fn frequency_response_db(kernel: &[f32], frequency: f32) -> f32 {
+        let radians_per_sample = std::f32::consts::PI * frequency / TEST_SAMPLE_RATE;
+        let mut real = 0.0;
+        let mut imaginary = 0.0;
+
+        for (index, sample) in kernel.iter().enumerate() {
+            let phase = -(radians_per_sample * index as f32);
+            real += sample * phase.cos();
+            imaginary += sample * phase.sin();
+        }
+
+        (real * real + imaginary * imaginary).sqrt().max(1.0e-12).log10() * 20.0
+    }
+
+    fn db_to_gain(db: f32) -> f32 {
+        10.0_f32.powf(db / 20.0)
     }
 
     fn sine_amplitude(signal: &[f32], radians_per_sample: f32) -> f32 {

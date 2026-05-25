@@ -222,10 +222,7 @@ impl Default for WaverPlugin {
         let params = Arc::new(WaverPluginParams::default());
         params.lookup_curve.set(lookup_curve.clone());
         *params.current_preset.lock() = String::from("./Default.ron");
-        *params.saved_plot_state.lock() = capture_plot_state(
-            &lookup_curve,
-            DEFAULT_SYMMETRY_MODE,
-        );
+        *params.saved_plot_state.lock() = capture_plot_state(&lookup_curve, DEFAULT_SYMMETRY_MODE);
         params.plot_dirty.store(false, Ordering::Relaxed);
 
         Self {
@@ -272,9 +269,7 @@ impl Default for WaverPlugin {
             current_strict_dbfs_ticks: params.current_strict_dbfs_ticks.clone(),
             current_grid_step_x: params.current_grid_step_x.clone(),
             current_grid_step_y: params.current_grid_step_y.clone(),
-            oversampling_times: Arc::new(AtomicF32::new(oversampling_factor_to_times(
-                DEFAULT_OVERSAMPLING_FACTOR,
-            ) as f32)),
+            oversampling_times: Arc::new(AtomicF32::new(oversampling_factor_to_times(DEFAULT_OVERSAMPLING_FACTOR) as f32)),
             oversamplers: Vec::new(),
             reported_oversampling_factor: usize::MAX,
             reported_oversampling_algorithm: usize::MAX,
@@ -289,8 +284,7 @@ impl Default for WaverPlugin {
 
 impl Default for WaverPluginParams {
     fn default() -> Self {
-        let oversampling_times =
-            Arc::new(AtomicF32::new(oversampling_factor_to_times(DEFAULT_OVERSAMPLING_FACTOR) as f32));
+        let oversampling_times = Arc::new(AtomicF32::new(oversampling_factor_to_times(DEFAULT_OVERSAMPLING_FACTOR) as f32));
         let lookup_curve = LookupCurve::load_from_bytes(include_bytes!("default.ron")).unwrap();
 
         Self {
@@ -315,9 +309,7 @@ impl Default for WaverPluginParams {
                 symmetry_mode: DEFAULT_SYMMETRY_MODE,
             })),
             plot_dirty: Arc::new(AtomicBool::new(false)),
-            automation_slot_bindings: Arc::new(Mutex::new(
-                [AutomationSlotBinding::default(); AUTOMATION_SLOT_COUNT],
-            )),
+            automation_slot_bindings: Arc::new(Mutex::new([AutomationSlotBinding::default(); AUTOMATION_SLOT_COUNT])),
             oversampling_times: oversampling_times.clone(),
 
             pre_gain: FloatParam::new(
@@ -355,10 +347,7 @@ impl Default for WaverPluginParams {
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
             mix: FloatParam::new("Mix", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::OversamplingAware(
-                    oversampling_times,
-                    &SmoothingStyle::Linear(50.0),
-                ))
+                .with_smoother(SmoothingStyle::OversamplingAware(oversampling_times, &SmoothingStyle::Linear(50.0)))
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(1))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
@@ -416,12 +405,7 @@ impl Plugin for WaverPlugin {
         self.params.clone()
     }
 
-    fn initialize(
-        &mut self,
-        audio_io_layout: &AudioIOLayout,
-        buffer_config: &BufferConfig,
-        context: &mut impl InitContext<Self>,
-    ) -> bool {
+    fn initialize(&mut self, audio_io_layout: &AudioIOLayout, buffer_config: &BufferConfig, context: &mut impl InitContext<Self>) -> bool {
         let num_channels = audio_io_layout
             .main_output_channels
             .expect("Plugin was initialized without any outputs")
@@ -430,9 +414,7 @@ impl Plugin for WaverPlugin {
         self.rebuild_oversamplers(num_channels, buffer_config.max_buffer_size as usize);
 
         if let Some(oversampler) = self.oversamplers.first() {
-            context.set_latency_samples(
-                oversampler.latency(self.current_oversampling_factor.load(Ordering::Relaxed)),
-            );
+            context.set_latency_samples(oversampler.latency(self.current_oversampling_factor.load(Ordering::Relaxed)));
         }
         self.reported_oversampling_factor = self.current_oversampling_factor.load(Ordering::Relaxed);
         self.reported_oversampling_algorithm = self.current_oversampling_algorithm.load(Ordering::Relaxed);
@@ -458,9 +440,7 @@ impl Plugin for WaverPlugin {
         let oversampling_algorithm = self.current_oversampling_algorithm.load(Ordering::Relaxed);
         let resolution = self.current_resolution.load(Ordering::Relaxed);
         let oversampling_times = oversampling_factor_to_times(oversampling_factor);
-        self.params
-            .oversampling_times
-            .store(oversampling_times as f32, Ordering::Relaxed);
+        self.params.oversampling_times.store(oversampling_times as f32, Ordering::Relaxed);
 
         if oversampling_algorithm != self.reported_oversampling_algorithm {
             self.reported_oversampling_algorithm = oversampling_algorithm;
@@ -491,6 +471,8 @@ impl Plugin for WaverPlugin {
         );
 
         if let Some(lut) = self.editor_data.lut_cache.try_lock() {
+            let bypass_identity_lut_clipping = oversampling_factor > 0 && lut_is_linear_identity(&lut, symmetry_mode);
+
             for (_, block) in buffer.iter_blocks(buffer.samples()) {
                 for (channel_samples, oversampler) in block.into_iter().zip(self.oversamplers.iter_mut()) {
                     oversampler.process(channel_samples, oversampling_factor, |upsampled| {
@@ -507,15 +489,19 @@ impl Plugin for WaverPlugin {
                                 block_max_signed = input;
                             }
 
-                            let shaped = curve_lookup(
-                                &lut,
-                                input,
-                                linear_ext_enabled,
-                                interpolation_mode,
-                                symmetry_mode,
-                                self.current_display_mode.load(Ordering::Relaxed),
-                                self.current_display_scope.load(Ordering::Relaxed),
-                            );
+                            let shaped = if bypass_identity_lut_clipping {
+                                input
+                            } else {
+                                curve_lookup(
+                                    &lut,
+                                    input,
+                                    linear_ext_enabled,
+                                    interpolation_mode,
+                                    symmetry_mode,
+                                    self.current_display_mode.load(Ordering::Relaxed),
+                                    self.current_display_scope.load(Ordering::Relaxed),
+                                )
+                            };
                             let wet_signal = shaped * post_gain;
                             *sample = dry_signal * (1.0 - mix) + wet_signal * mix;
 
@@ -546,8 +532,7 @@ impl Plugin for WaverPlugin {
             }
         }
 
-        self.latest_input
-            .store(block_max_signed.clamp(-1.5, 1.5), Ordering::Relaxed);
+        self.latest_input.store(block_max_signed.clamp(-1.5, 1.5), Ordering::Relaxed);
 
         ProcessStatus::Normal
     }
@@ -574,9 +559,7 @@ impl Plugin for WaverPlugin {
 
 impl WaverPlugin {
     fn rebuild_oversamplers(&mut self, num_channels: usize, maximum_block_size: usize) {
-        let algorithm = OversamplingAlgorithm::from_index(
-            self.current_oversampling_algorithm.load(Ordering::Relaxed),
-        );
+        let algorithm = OversamplingAlgorithm::from_index(self.current_oversampling_algorithm.load(Ordering::Relaxed));
         self.oversamplers = (0..num_channels)
             .map(|_| ConfigurableOversampler::new(maximum_block_size, MAX_OVERSAMPLING_FACTOR, algorithm))
             .collect();
@@ -687,9 +670,7 @@ pub fn apply_automation_slots_to_curve(
             _ => {}
         }
 
-        if new_position.x.to_bits() != original.position.x.to_bits()
-            || new_position.y.to_bits() != original.position.y.to_bits()
-        {
+        if new_position.x.to_bits() != original.position.x.to_bits() || new_position.y.to_bits() != original.position.y.to_bits() {
             curve.modify_knot(
                 knot_index,
                 bevy_lookup_curve::Knot {
@@ -763,23 +744,15 @@ pub fn rebuild_lut_for_mode(curve: &LookupCurve, resolution: usize, symmetry_mod
     lut
 }
 
-pub fn capture_plot_state(
-    curve: &LookupCurve,
-    symmetry_mode: usize,
-) -> PlotStateSnapshot {
+pub fn capture_plot_state(curve: &LookupCurve, symmetry_mode: usize) -> PlotStateSnapshot {
     PlotStateSnapshot {
         curve: curve.clone(),
         symmetry_mode,
     }
 }
 
-pub fn plot_state_matches(
-    snapshot: &PlotStateSnapshot,
-    curve: &LookupCurve,
-    symmetry_mode: usize,
-) -> bool {
-    snapshot.symmetry_mode == symmetry_mode
-        && curves_match(&snapshot.curve, curve)
+pub fn plot_state_matches(snapshot: &PlotStateSnapshot, curve: &LookupCurve, symmetry_mode: usize) -> bool {
+    snapshot.symmetry_mode == symmetry_mode && curves_match(&snapshot.curve, curve)
 }
 
 fn curves_match(a: &LookupCurve, b: &LookupCurve) -> bool {
@@ -794,12 +767,10 @@ fn curves_match(a: &LookupCurve, b: &LookupCurve) -> bool {
             && left.position.y.to_bits() == right.position.y.to_bits()
             && std::mem::discriminant(&left.interpolation) == std::mem::discriminant(&right.interpolation)
             && left.left_tangent.slope.to_bits() == right.left_tangent.slope.to_bits()
-            && std::mem::discriminant(&left.left_tangent.mode)
-                == std::mem::discriminant(&right.left_tangent.mode)
+            && std::mem::discriminant(&left.left_tangent.mode) == std::mem::discriminant(&right.left_tangent.mode)
             && option_f32_bits_equal(left.left_tangent.weight, right.left_tangent.weight)
             && left.right_tangent.slope.to_bits() == right.right_tangent.slope.to_bits()
-            && std::mem::discriminant(&left.right_tangent.mode)
-                == std::mem::discriminant(&right.right_tangent.mode)
+            && std::mem::discriminant(&left.right_tangent.mode) == std::mem::discriminant(&right.right_tangent.mode)
             && option_f32_bits_equal(left.right_tangent.weight, right.right_tangent.weight)
     })
 }
@@ -820,8 +791,7 @@ pub fn sync_lut_cache_from_state(
     symmetry_mode: usize,
 ) {
     let resolution = std::cmp::max(resolution, 2);
-    let needs_sync = dirty_flag.swap(false, Ordering::Relaxed)
-        || lut_cache.try_lock().map(|lut| lut.len() != resolution).unwrap_or(false);
+    let needs_sync = dirty_flag.swap(false, Ordering::Relaxed) || lut_cache.try_lock().map(|lut| lut.len() != resolution).unwrap_or(false);
 
     if !needs_sync {
         return;
@@ -856,12 +826,20 @@ pub fn sample_lut(lut: &[f32], index: usize, fraction: f32, interpolation_mode: 
     match interpolation_mode {
         INTERPOLATION_MODE_LINEAR => {
             let value = a + t * (b - a);
-            if value.is_finite() { value } else { a }
+            if value.is_finite() {
+                value
+            } else {
+                a
+            }
         }
         INTERPOLATION_MODE_COSINE => {
             let mu = (1.0 - (t * std::f32::consts::PI).cos()) * 0.5;
             let value = a * (1.0 - mu) + b * mu;
-            if value.is_finite() { value } else { a }
+            if value.is_finite() {
+                value
+            } else {
+                a
+            }
         }
         INTERPOLATION_MODE_HERMITE if lut.len() >= 4 && idx < lut.len().saturating_sub(1) => {
             let y0 = lut[idx.saturating_sub(1)];
@@ -881,32 +859,30 @@ pub fn sample_lut(lut: &[f32], index: usize, fraction: f32, interpolation_mode: 
             let h11 = t3 - t2;
 
             let value = h00 * y1 + h10 * m1 + h01 * y2 + h11 * m2;
-            if value.is_finite() { value } else { y1 }
+            if value.is_finite() {
+                value
+            } else {
+                y1
+            }
         }
         _ => {
             let value = a + t * (b - a);
-            if value.is_finite() { value } else { a }
+            if value.is_finite() {
+                value
+            } else {
+                a
+            }
         }
     }
 }
 
-pub fn curve_lookup_chart(
-    lut: &[f32],
-    input: f32,
-    linear_ext_enabled: bool,
-    interpolation_mode: usize,
-    symmetry_mode: usize,
-) -> f32 {
+pub fn curve_lookup_chart(lut: &[f32], input: f32, linear_ext_enabled: bool, interpolation_mode: usize, symmetry_mode: usize) -> f32 {
     if lut.is_empty() {
         return 0.0;
     }
 
     if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
-        let sample_input = if linear_ext_enabled {
-            input
-        } else {
-            input.clamp(-1.0, 1.0)
-        };
+        let sample_input = if linear_ext_enabled { input } else { input.clamp(-1.0, 1.0) };
 
         let t = ((sample_input + 1.0) * 0.5) * (lut.len() - 1) as f32;
         let clamped_t = t.clamp(0.0, (lut.len() - 1) as f32);
@@ -920,7 +896,11 @@ pub fn curve_lookup_chart(
                 let step = last_val - prev_val;
                 let excess = t - (lut.len() - 1) as f32;
                 let linear = last_val + step * excess;
-                if linear.is_finite() { linear } else { last_val }
+                if linear.is_finite() {
+                    linear
+                } else {
+                    last_val
+                }
             } else {
                 lut[lut.len() - 1]
             }
@@ -931,7 +911,11 @@ pub fn curve_lookup_chart(
                 let step = next_val - first_val;
                 let excess = t;
                 let linear = first_val + step * excess;
-                if linear.is_finite() { linear } else { first_val }
+                if linear.is_finite() {
+                    linear
+                } else {
+                    first_val
+                }
             } else {
                 lut[0]
             }
@@ -957,7 +941,11 @@ pub fn curve_lookup_chart(
                 let slope = last_val - prev_val;
                 let excess = t - (lut.len() - 1) as f32;
                 let linear = last_val + slope * excess;
-                if linear.is_finite() { linear } else { last_val }
+                if linear.is_finite() {
+                    linear
+                } else {
+                    last_val
+                }
             } else {
                 lut[lut.len() - 1]
             }
@@ -967,6 +955,24 @@ pub fn curve_lookup_chart(
 
         curve_val * input.signum()
     }
+}
+
+pub fn lut_is_linear_identity(lut: &[f32], symmetry_mode: usize) -> bool {
+    if lut.len() < 2 {
+        return false;
+    }
+
+    let denominator = (lut.len() - 1) as f32;
+    lut.iter().enumerate().all(|(index, value)| {
+        let normalized = index as f32 / denominator;
+        let expected = if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
+            normalized * 2.0 - 1.0
+        } else {
+            normalized
+        };
+
+        (*value - expected).abs() <= 1.0e-5
+    })
 }
 
 pub fn curve_lookup(
@@ -988,8 +994,7 @@ pub fn curve_lookup(
         } else {
             input
         };
-        let chart_output =
-            curve_lookup_chart(lut, chart_input, linear_ext_enabled, interpolation_mode, symmetry_mode);
+        let chart_output = curve_lookup_chart(lut, chart_input, linear_ext_enabled, interpolation_mode, symmetry_mode);
         chart_output_to_audio(chart_output, true)
     } else {
         let sign = input.signum();
@@ -999,18 +1004,12 @@ pub fn curve_lookup(
         } else {
             magnitude
         };
-        let chart_output =
-            curve_lookup_chart(lut, chart_input, linear_ext_enabled, interpolation_mode, symmetry_mode);
+        let chart_output = curve_lookup_chart(lut, chart_input, linear_ext_enabled, interpolation_mode, symmetry_mode);
         chart_output_to_audio(chart_output, false) * sign
     }
 }
 
-pub fn audio_input_to_chart_input(
-    input: f32,
-    symmetry_mode: usize,
-    display_mode: usize,
-    display_scope: usize,
-) -> f32 {
+pub fn audio_input_to_chart_input(input: f32, symmetry_mode: usize, display_mode: usize, display_scope: usize) -> f32 {
     if display_mode != DISPLAY_MODE_DBFS || display_scope != DISPLAY_SCOPE_XY {
         if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
             input
@@ -1024,11 +1023,7 @@ pub fn audio_input_to_chart_input(
     }
 }
 
-pub fn chart_output_to_audio_output(
-    chart_output: f32,
-    symmetry_mode: usize,
-    display_mode: usize,
-) -> f32 {
+pub fn chart_output_to_audio_output(chart_output: f32, symmetry_mode: usize, display_mode: usize) -> f32 {
     if display_mode != DISPLAY_MODE_DBFS {
         return if symmetry_mode == SYMMETRY_MODE_ASYMMETRIC {
             chart_output
@@ -1075,16 +1070,7 @@ pub fn build_default_dbfs_curve(symmetry_mode: usize) -> LookupCurve {
         ];
         build_dbfs_cubic_curve(&points, true)
     } else {
-        let points = [
-            0.0_f32,
-            0.001,
-            0.003_162_277_6,
-            0.01,
-            0.031_622_776,
-            0.1,
-            0.316_227_76,
-            1.0,
-        ];
+        let points = [0.0_f32, 0.001, 0.003_162_277_6, 0.01, 0.031_622_776, 0.1, 0.316_227_76, 1.0];
         build_dbfs_cubic_curve(&points, false)
     }
 }
@@ -1170,16 +1156,10 @@ fn build_dbfs_cubic_curve(xs: &[f32], bipolar: bool) -> LookupCurve {
             knot = knot.with_tangent_slope(TangentSide::Right, slopes[i]);
 
             if i > 0 {
-                knot = knot.with_tangent_weight(
-                    TangentSide::Left,
-                    Some(dbfs_segment_weight(points[i - 1].x, points[i].x)),
-                );
+                knot = knot.with_tangent_weight(TangentSide::Left, Some(dbfs_segment_weight(points[i - 1].x, points[i].x)));
             }
             if i + 1 < points.len() {
-                knot = knot.with_tangent_weight(
-                    TangentSide::Right,
-                    Some(dbfs_segment_weight(points[i].x, points[i + 1].x)),
-                );
+                knot = knot.with_tangent_weight(TangentSide::Right, Some(dbfs_segment_weight(points[i].x, points[i + 1].x)));
             }
 
             knot
@@ -1265,9 +1245,7 @@ pub fn save_preset_file(path: &str, snapshot: &PlotStateSnapshot) -> Result<(), 
         symmetry_mode: snapshot.symmetry_mode,
     };
 
-    let config = ron::ser::PrettyConfig::new()
-        .new_line("\n".to_string())
-        .indentor("  ".to_string());
+    let config = ron::ser::PrettyConfig::new().new_line("\n".to_string()).indentor("  ".to_string());
     let serialized = ron::ser::to_string_pretty(&preset, config)?;
     std::fs::write(path, serialized)?;
     Ok(())
@@ -1323,12 +1301,7 @@ const fn oversampling_factor_to_times(factor: usize) -> usize {
 }
 
 fn make_curve_asymmetric(curve: &LookupCurve) -> LookupCurve {
-    let positive_knots: Vec<_> = curve
-        .knots()
-        .iter()
-        .copied()
-        .filter(|knot| knot.position.x >= 0.0)
-        .collect();
+    let positive_knots: Vec<_> = curve.knots().iter().copied().filter(|knot| knot.position.x >= 0.0).collect();
 
     if positive_knots.is_empty() {
         return LookupCurve::new(vec![
@@ -1360,12 +1333,7 @@ fn make_curve_asymmetric(curve: &LookupCurve) -> LookupCurve {
 }
 
 fn make_curve_symmetric(curve: &LookupCurve) -> LookupCurve {
-    let mut positive_knots: Vec<_> = curve
-        .knots()
-        .iter()
-        .copied()
-        .filter(|knot| knot.position.x >= 0.0)
-        .collect();
+    let mut positive_knots: Vec<_> = curve.knots().iter().copied().filter(|knot| knot.position.x >= 0.0).collect();
 
     if positive_knots.is_empty() {
         positive_knots.push(bevy_lookup_curve::Knot {
@@ -1390,4 +1358,24 @@ fn mirror_knot_around_origin(knot: bevy_lookup_curve::Knot) -> bevy_lookup_curve
     };
     mirrored.position = Vec2::new(-knot.position.x, -knot.position.y);
     mirrored
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_identity_lut_is_detected_for_symmetric_mode() {
+        assert!(lut_is_linear_identity(&[0.0, 0.25, 0.5, 0.75, 1.0], SYMMETRY_MODE_SYMMETRIC));
+    }
+
+    #[test]
+    fn linear_identity_lut_is_detected_for_asymmetric_mode() {
+        assert!(lut_is_linear_identity(&[-1.0, -0.5, 0.0, 0.5, 1.0], SYMMETRY_MODE_ASYMMETRIC));
+    }
+
+    #[test]
+    fn non_linear_lut_is_not_treated_as_identity() {
+        assert!(!lut_is_linear_identity(&[0.0, 0.2, 0.8, 1.0], SYMMETRY_MODE_SYMMETRIC));
+    }
 }
