@@ -22,7 +22,7 @@ use crate::{
     curve_lookup_chart, fs, is_default_linear_curve, load_image_from_memory, load_preset_file,
     save_preset_file,
     sync_lut_cache_from_state, transform_curve_for_symmetry_mode,
-    oversampling::{OVERSAMPLING_ALGORITHM_FLAT_FIR, OVERSAMPLING_ALGORITHM_LANCZOS3},
+    oversampling::{OVERSAMPLING_ALGORITHM_FLAT_FIR, OVERSAMPLING_ALGORITHM_LANCZOS3, OVERSAMPLING_ALGORITHM_RUBATO},
     param_knob::ParamKnob,
     sout_ui::{self, SoutTheme},
     AutomationSlotBinding, AUTOMATION_SLOT_COUNT, AUTOMATION_TARGET_NONE, AUTOMATION_TARGET_X, AUTOMATION_TARGET_Y,
@@ -1057,6 +1057,11 @@ impl EditorData {
                                                                                             &mut selected_algo,
                                                                                             OVERSAMPLING_ALGORITHM_FLAT_FIR,
                                                                                             "Flat FIR",
+                                                                                        );
+                                                                                        ui.selectable_value(
+                                                                                            &mut selected_algo,
+                                                                                            OVERSAMPLING_ALGORITHM_RUBATO,
+                                                                                            "Rubato",
                                                                                         );
                                                                                     });
 
@@ -2569,6 +2574,7 @@ fn oversampling_algorithm_label(mode: usize) -> &'static str {
     match mode {
         OVERSAMPLING_ALGORITHM_LANCZOS3 => "Lanczos3",
         OVERSAMPLING_ALGORITHM_FLAT_FIR => "Flat FIR",
+        OVERSAMPLING_ALGORITHM_RUBATO => "Rubato",
         _ => "Lanczos3",
     }
 }

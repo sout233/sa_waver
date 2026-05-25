@@ -2,10 +2,12 @@
 // Original copyright (C) 2023-2024 Robbert van der Helm.
 
 use nih_plug::debug::*;
+use rubato::{audioadapter_buffers::direct::SequentialSliceOfVecs, Fft, FixedSync, Resampler};
 use std::sync::LazyLock;
 
 pub const OVERSAMPLING_ALGORITHM_LANCZOS3: usize = 0;
 pub const OVERSAMPLING_ALGORITHM_FLAT_FIR: usize = 1;
+pub const OVERSAMPLING_ALGORITHM_RUBATO: usize = 2;
 pub const DEFAULT_OVERSAMPLING_ALGORITHM: usize = OVERSAMPLING_ALGORITHM_FLAT_FIR;
 
 const LANCZOS3_UPSAMPLING_KERNEL: [f32; 11] = [
@@ -55,12 +57,14 @@ static FINAL_FLAT_FIR_DOWNSAMPLING_KERNEL: LazyLock<[f32; FINAL_DOWNSAMPLING_KER
 pub enum OversamplingAlgorithm {
     Lanczos3,
     FlatFir,
+    Rubato,
 }
 
 impl OversamplingAlgorithm {
     pub fn from_index(index: usize) -> Self {
         match index {
             OVERSAMPLING_ALGORITHM_FLAT_FIR => Self::FlatFir,
+            OVERSAMPLING_ALGORITHM_RUBATO => Self::Rubato,
             _ => Self::Lanczos3,
         }
     }
@@ -69,6 +73,7 @@ impl OversamplingAlgorithm {
         match self {
             Self::Lanczos3 => OVERSAMPLING_ALGORITHM_LANCZOS3,
             Self::FlatFir => OVERSAMPLING_ALGORITHM_FLAT_FIR,
+            Self::Rubato => OVERSAMPLING_ALGORITHM_RUBATO,
         }
     }
 
@@ -80,6 +85,7 @@ impl OversamplingAlgorithm {
                 FINAL_FLAT_FIR_DOWNSAMPLING_KERNEL.as_slice(),
             ),
             Self::FlatFir => (FLAT_FIR_UPSAMPLING_KERNEL.as_slice(), FINAL_FLAT_FIR_DOWNSAMPLING_KERNEL.as_slice()),
+            Self::Rubato => unreachable!("Rubato uses a dedicated resampling path"),
         }
     }
 
@@ -92,7 +98,20 @@ impl OversamplingAlgorithm {
 pub struct ConfigurableOversampler {
     algorithm: OversamplingAlgorithm,
     stages: Vec<FilterStage>,
+    rubato: Option<Vec<RubatoOversampler>>,
     latencies: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct RubatoOversampler {
+    maximum_block_size: usize,
+    factor: usize,
+    block_len: usize,
+    upsampler: Fft<f32>,
+    downsampler: Fft<f32>,
+    input: Vec<Vec<f32>>,
+    upsampled: Vec<Vec<f32>>,
+    downsampled: Vec<Vec<f32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,23 +130,33 @@ struct FilterStage {
 
 impl ConfigurableOversampler {
     pub fn new(maximum_block_size: usize, max_factor: usize, algorithm: OversamplingAlgorithm) -> Self {
-        let mut stages = Vec::with_capacity(max_factor);
-        for stage in 0..max_factor {
-            stages.push(FilterStage::new(maximum_block_size, stage, algorithm));
-        }
+        let (stages, rubato, latencies) = if algorithm == OversamplingAlgorithm::Rubato {
+            let rubato: Vec<_> = (1..=max_factor)
+                .map(|factor| RubatoOversampler::new(maximum_block_size, factor))
+                .collect();
+            let latencies = rubato.iter().map(RubatoOversampler::latency).collect();
+            (Vec::new(), Some(rubato), latencies)
+        } else {
+            let mut stages = Vec::with_capacity(max_factor);
+            for stage in 0..max_factor {
+                stages.push(FilterStage::new(maximum_block_size, stage, algorithm));
+            }
 
-        let latencies = stages
-            .iter()
-            .map(|stage| stage.effective_latency())
-            .scan(0, |total_latency, latency| {
-                *total_latency += latency;
-                Some(*total_latency)
-            })
-            .collect();
+            let latencies = stages
+                .iter()
+                .map(|stage| stage.effective_latency())
+                .scan(0, |total_latency, latency| {
+                    *total_latency += latency;
+                    Some(*total_latency)
+                })
+                .collect();
+            (stages, None, latencies)
+        };
 
         Self {
             algorithm,
             stages,
+            rubato,
             latencies,
         }
     }
@@ -135,6 +164,11 @@ impl ConfigurableOversampler {
     pub fn reset(&mut self) {
         for stage in &mut self.stages {
             stage.reset();
+        }
+        if let Some(rubato) = &mut self.rubato {
+            for oversampler in rubato {
+                oversampler.reset();
+            }
         }
     }
 
@@ -151,12 +185,23 @@ impl ConfigurableOversampler {
     }
 
     pub fn process(&mut self, block: &mut [f32], factor: usize, f: impl FnOnce(&mut [f32])) {
-        assert!(factor <= self.stages.len());
-
         if factor == 0 {
             f(block);
             return;
         }
+
+        if self.algorithm == OversamplingAlgorithm::Rubato {
+            assert!(factor <= self.latencies.len());
+            let rubato = self
+                .rubato
+                .as_mut()
+                .and_then(|oversamplers| oversamplers.get_mut(factor - 1))
+                .expect("Rubato oversampler should be initialized");
+            rubato.process(block, factor, f);
+            return;
+        }
+
+        assert!(factor <= self.stages.len());
 
         assert!(
             block.len() <= self.stages[0].scratch_buffer.len() / 2,
@@ -204,6 +249,78 @@ impl ConfigurableOversampler {
         assert_eq!(next_downsampled_block_len, block.len());
         self.stages[0].downsample_to(block);
     }
+}
+
+impl RubatoOversampler {
+    fn new(maximum_block_size: usize, factor: usize) -> Self {
+        Self::new_for_block_len(maximum_block_size, factor, maximum_block_size.max(1))
+    }
+
+    fn new_for_block_len(maximum_block_size: usize, factor: usize, block_len: usize) -> Self {
+        let block_len = block_len.max(1);
+        let upsampled_len = block_len * 2usize.pow(factor as u32);
+
+        Self {
+            maximum_block_size,
+            factor,
+            block_len,
+            upsampler: new_rubato_resampler(1, 2usize.pow(factor as u32), block_len),
+            downsampler: new_rubato_resampler(2usize.pow(factor as u32), 1, upsampled_len),
+            input: vec![vec![0.0; block_len]],
+            upsampled: vec![vec![0.0; upsampled_len]],
+            downsampled: vec![vec![0.0; block_len]],
+        }
+    }
+
+    fn reset(&mut self) {
+        self.upsampler.reset();
+        self.downsampler.reset();
+        self.input[0].fill(0.0);
+        self.upsampled[0].fill(0.0);
+        self.downsampled[0].fill(0.0);
+    }
+
+    fn latency(&self) -> u32 {
+        self.block_len as u32
+    }
+
+    fn process(&mut self, block: &mut [f32], factor: usize, f: impl FnOnce(&mut [f32])) {
+        assert!(
+            block.len() <= self.maximum_block_size,
+            "The block's size exceeds the maximum block size"
+        );
+
+        if self.factor != factor || self.block_len != block.len() {
+            *self = Self::new_for_block_len(self.maximum_block_size, factor, block.len());
+        }
+
+        self.input[0][..block.len()].copy_from_slice(block);
+
+        let upsampled_len = block.len() * 2usize.pow(factor as u32);
+        {
+            let input_adapter = SequentialSliceOfVecs::new(&self.input, 1, block.len()).unwrap();
+            let mut output_adapter = SequentialSliceOfVecs::new_mut(&mut self.upsampled, 1, upsampled_len).unwrap();
+            self.upsampler
+                .process_into_buffer(&input_adapter, &mut output_adapter, None)
+                .expect("Rubato upsampling failed");
+        }
+
+        f(&mut self.upsampled[0][..upsampled_len]);
+
+        {
+            let input_adapter = SequentialSliceOfVecs::new(&self.upsampled, 1, upsampled_len).unwrap();
+            let mut output_adapter = SequentialSliceOfVecs::new_mut(&mut self.downsampled, 1, block.len()).unwrap();
+            self.downsampler
+                .process_into_buffer(&input_adapter, &mut output_adapter, None)
+                .expect("Rubato downsampling failed");
+        }
+
+        block.copy_from_slice(&self.downsampled[0][..block.len()]);
+    }
+}
+
+fn new_rubato_resampler(input_rate: usize, output_rate: usize, chunk_size: usize) -> Fft<f32> {
+    Fft::new(input_rate, output_rate, chunk_size.max(1), 1, 1, FixedSync::Both).expect("Failed to create Rubato FFT resampler")
 }
 
 impl FilterStage {
@@ -511,6 +628,49 @@ mod tests {
 
         assert!((upsampling_dc - 2.0).abs() < 1.0e-5);
         assert!((downsampling_dc - 1.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn rubato_oversampler_processes_all_supported_factors() {
+        for factor in 1..=3 {
+            let mut signal = vec![0.0; 256];
+            let radians_per_sample = std::f32::consts::TAU * 1_000.0 / TEST_SAMPLE_RATE;
+
+            for (index, sample) in signal.iter_mut().enumerate() {
+                *sample = (radians_per_sample * index as f32).sin();
+            }
+
+            let mut oversampler = ConfigurableOversampler::new(signal.len(), 3, OversamplingAlgorithm::Rubato);
+            oversampler.process(&mut signal, factor, |upsampled| {
+                for sample in upsampled {
+                    *sample = sample.tanh();
+                }
+            });
+
+            assert!(signal.iter().all(|sample| sample.is_finite()));
+        }
+    }
+
+    #[test]
+    fn rubato_oversampler_handles_variable_block_lengths() {
+        let mut oversampler = ConfigurableOversampler::new(512, 3, OversamplingAlgorithm::Rubato);
+
+        for block_len in [512, 128, 384, 64] {
+            let mut signal = vec![0.0; block_len];
+            let radians_per_sample = std::f32::consts::TAU * 500.0 / TEST_SAMPLE_RATE;
+
+            for (index, sample) in signal.iter_mut().enumerate() {
+                *sample = (radians_per_sample * index as f32).sin();
+            }
+
+            oversampler.process(&mut signal, 3, |upsampled| {
+                for sample in upsampled {
+                    *sample = sample.tanh();
+                }
+            });
+
+            assert!(signal.iter().all(|sample| sample.is_finite()));
+        }
     }
 
     fn measured_gain_db(frequency: f32, factor: usize) -> f32 {
