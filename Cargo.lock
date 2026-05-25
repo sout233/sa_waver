@@ -6941,7 +6941,7 @@ dependencies = [
 
 [[package]]
 name = "sa_waver"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "bevy_lookup_curve",
  "bevy_math",
@@ -6959,7 +6959,7 @@ dependencies = [
 
 [[package]]
 name = "sa_waver_installer"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "eframe 0.31.1",
  "egui_extras",

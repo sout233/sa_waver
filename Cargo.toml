@@ -1,6 +1,6 @@
 [package]
 name = "sa_waver"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["sout <sout233@163.com>"]
 license = "GPL-3.0-or-later"

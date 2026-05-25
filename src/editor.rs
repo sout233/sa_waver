@@ -264,7 +264,7 @@ impl EditorData {
 
                                                 ui.allocate_ui(egui::vec2(24.0, ui.available_height()), |ui| {
                                                     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                                                        ui.add_space(4.0);
+                                                        ui.add_space(2.0);
 
                                                         let response = ui.add_sized(
                                                             egui::vec2(24.0, 24.0),
@@ -297,7 +297,7 @@ impl EditorData {
 
                                                 ui.allocate_ui(egui::vec2(24.0, ui.available_height()), |ui| {
                                                     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                                                        ui.add_space(4.0);
+                                                        ui.add_space(2.0);
 
                                                         if ui
                                                             .add(egui::Button::image(img_src).min_size(egui::vec2(24.0, 24.0)))
